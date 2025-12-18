@@ -128,7 +128,8 @@ The script generates a configuration file at `/home/<username>/<username>-odoo.c
 
 - Admin password: `admin_password` (change this after installation!)
 - Database user: matches the system username
-- Port: as specified during installation
+- HTTP port: as specified during installation
+- XML-RPC port: same as HTTP port
 - Addons path: includes both standard and custom addons
 - Log file location
 - Data directory location
@@ -259,5 +260,7 @@ Feel free to submit issues, fork the repository, and create pull requests for im
 This script is provided as-is for use by Odoo developers and system administrators.
 
 ## Author
+
+**abdalmola**
 
 Created for senior Odoo developers to streamline instance deployment and management.

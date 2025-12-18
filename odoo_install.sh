@@ -15,6 +15,7 @@
 # - Correct directory ownership and permissions
 # - Service enablement and start
 #
+# Author: abdalmola
 # Created for a senior Odoo developer to streamline setup tasks.
 # ==============================================================================
 
@@ -244,6 +245,7 @@ db_host = False
 db_port = False
 db_user = $OE_USER
 db_password = False
+http_port = $OE_PORT
 xmlrpc_port = $OE_PORT
 ; Specify the addons path. Add your custom addons here.
 addons_path = $OE_HOME_EXT/addons,$OE_CUSTOM_ADDONS_DIR
