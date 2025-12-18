@@ -44,19 +44,65 @@ The script installs and configures the following components:
 
 ## Usage
 
-### Basic Usage
+### Run Directly from GitHub (Recommended)
 
-1. Make the script executable:
+You can run the script directly from GitHub without cloning the repository:
+
+> **Note:** Replace `abdalmola/OdooInstallScript` with your actual GitHub username and repository name if different. It's recommended to review the script content before running it directly.
+
+#### Method 1: Using curl (one-liner)
+```bash
+curl -fsSL https://raw.githubusercontent.com/abdalmola/OdooInstallScript/main/odoo_install.sh | sudo bash
+```
+
+#### Method 2: Using wget (one-liner)
+```bash
+wget -qO- https://raw.githubusercontent.com/abdalmola/OdooInstallScript/main/odoo_install.sh | sudo bash
+```
+
+#### Method 3: Download first, then execute
+```bash
+# Download the script
+wget https://raw.githubusercontent.com/abdalmola/OdooInstallScript/main/odoo_install.sh
+
+# Make it executable
+chmod +x odoo_install.sh
+
+# Run it
+sudo ./odoo_install.sh
+```
+
+Or using curl:
+```bash
+# Download the script
+curl -O https://raw.githubusercontent.com/abdalmola/OdooInstallScript/main/odoo_install.sh
+
+# Make it executable
+chmod +x odoo_install.sh
+
+# Run it
+sudo ./odoo_install.sh
+```
+
+### Basic Usage (From Cloned Repository)
+
+1. Clone the repository:
+```bash
+git clone https://github.com/abdalmola/OdooInstallScript.git
+cd OdooInstallScript
+```
+
+2. Make the script executable:
 ```bash
 chmod +x odoo_install.sh
 ```
 
-2. Run the script with sudo:
+3. Run the script with sudo:
 ```bash
 sudo ./odoo_install.sh
 ```
 
-3. Provide the requested information:
+4. Provide the requested information:
    - **Username**: Name for the Odoo system user (e.g., `odoo18`, `client1`)
    - **Odoo Version**: Branch/version to install (e.g., `18.0`, `17.0`, `16.0`)
    - **Port**: Port number for this instance (e.g., `8069`, `8070`)
