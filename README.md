@@ -48,22 +48,22 @@ The script installs and configures the following components:
 
 You can run the script directly from GitHub without cloning the repository:
 
-> **Note:** Replace `abdalmola/OdooInstallScript` with your actual GitHub username and repository name if different. It's recommended to review the script content before running it directly.
+> **Note:** It's recommended to review the script content before running it directly.
 
 #### Method 1: Using curl (one-liner)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/abdalmola/OdooInstallScript/main/odoo_install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/abdalmola-apps/OdooInstallScript/main/odoo_install.sh | sudo bash
 ```
 
 #### Method 2: Using wget (one-liner)
 ```bash
-wget -qO- https://raw.githubusercontent.com/abdalmola/OdooInstallScript/main/odoo_install.sh | sudo bash
+wget -qO- https://raw.githubusercontent.com/abdalmola-apps/OdooInstallScript/main/odoo_install.sh | sudo bash
 ```
 
 #### Method 3: Download first, then execute
 ```bash
 # Download the script
-wget https://raw.githubusercontent.com/abdalmola/OdooInstallScript/main/odoo_install.sh
+wget https://raw.githubusercontent.com/abdalmola-apps/OdooInstallScript/main/odoo_install.sh
 
 # Make it executable
 chmod +x odoo_install.sh
@@ -75,7 +75,7 @@ sudo ./odoo_install.sh
 Or using curl:
 ```bash
 # Download the script
-curl -O https://raw.githubusercontent.com/abdalmola/OdooInstallScript/main/odoo_install.sh
+curl -O https://raw.githubusercontent.com/abdalmola-apps/OdooInstallScript/main/odoo_install.sh
 
 # Make it executable
 chmod +x odoo_install.sh
@@ -88,7 +88,7 @@ sudo ./odoo_install.sh
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/abdalmola/OdooInstallScript.git
+git clone https://github.com/abdalmola-apps/OdooInstallScript.git
 cd OdooInstallScript
 ```
 
