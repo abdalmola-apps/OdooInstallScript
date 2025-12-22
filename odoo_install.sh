@@ -32,6 +32,7 @@ OE_HOME_EXT="$OE_HOME/odoo"
 OE_CONFIG="$OE_USER-odoo.conf"
 OE_SERVICE="$OE_USER-odoo.service"
 CHECKPOINT_FILE="/tmp/odoo_setup_checkpoint_$OE_USER"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Exit on any command failure
 set -e
@@ -182,6 +183,19 @@ if step 6 "Create Virtual Environment and Install Python Dependencies"; then
         pip3 install --no-cache-dir num2words ofxparse dbfread ebaysdk firebase_admin pyOpenSSL
         echo \"Python virtual environment setup complete.\"
     "
+
+    # Install additional requirements from script directory if exists
+    if [ -f "$SCRIPT_DIR/requirements.txt" ]; then
+        echo "Found additional requirements.txt in script directory. Installing..."
+        sudo su - "$OE_USER" -c "
+            source \"$OE_HOME_EXT/venv/bin/activate\"
+            pip3 install --no-cache-dir -r \"$SCRIPT_DIR/requirements.txt\"
+            echo \"Additional requirements installed successfully.\"
+        "
+    else
+        echo "No additional requirements.txt found in script directory. Skipping."
+    fi
+
     save_checkpoint 6
 fi
 

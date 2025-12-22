@@ -1,0 +1,14 @@
+# ==============================================================================
+# Additional Python Packages for Odoo
+# ==============================================================================
+# This file contains additional Python packages that extend Odoo functionality
+# and are commonly used in production environments.
+#
+# Installation:
+# pip install -r requirements.txt
+# ==============================================================================
+
+# Odoo CLI Tools
+# ------------------------------------------------------------------------------
+click-odoo>=1.6.0              # CLI framework for Odoo scripting
+click-odoo-contrib>=1.16.0     # Collection of useful Odoo CLI scripts

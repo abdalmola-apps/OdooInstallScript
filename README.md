@@ -14,10 +14,44 @@ Automated Bash script for setting up complete Odoo instances on Ubuntu/Debian sy
 
 ## Prerequisites
 
-- Ubuntu 18.04+ or Debian 9+ (tested on Ubuntu)
+- Ubuntu 18.04+ or Debian 9+ (tested on Ubuntu 22.04 Jammy)
 - Root or sudo access
 - Internet connection for downloading packages
 - Git installed (or will be installed by the script)
+
+## wkhtmltopdf Version Compatibility
+
+This script installs **wkhtmltopdf 0.12.6.1-2** which is the patched Qt version required for proper PDF generation in Odoo.
+
+### Why the Patched Version?
+
+The standard `apt` version of wkhtmltopdf uses an **unpatched Qt library** that doesn't support:
+- `--header-spacing` - Header spacing control
+- `--header-html` - Custom HTML headers
+- `--footer-html` - Custom HTML footers
+
+Without the patched version, you'll see warnings like:
+```
+wkhtmltopdf: The switch --header-spacing, is not support using unpatched qt, and will be ignored.
+```
+
+### Odoo Version Compatibility
+
+| Odoo Version | wkhtmltopdf Version | Status |
+|--------------|---------------------|--------|
+| 18.0 | 0.12.6.1-2 | ✅ Fully Supported |
+| 17.0 | 0.12.6.1-2 | ✅ Fully Supported |
+| 16.0 | 0.12.6.1-2 | ✅ Fully Supported |
+| 15.0 | 0.12.6.1-2 | ✅ Fully Supported |
+| 14.0 | 0.12.5 or 0.12.6.1-2 | ✅ Supported |
+
+### Installation Details
+
+The script automatically:
+1. Downloads the patched version from the official wkhtmltopdf repository
+2. Installs it using `apt install`
+3. Cleans up the downloaded .deb file
+4. Sets `XDG_RUNTIME_DIR` in systemd to prevent Qt warnings
 
 ## What Gets Installed
 
@@ -34,7 +68,7 @@ The script installs and configures the following components:
 
 ### Python Packages (in virtual environment)
 - All packages from Odoo's requirements.txt
-- Additional packages: num2words, ofxparse, dbfread, ebaysdk, firebase_admin, pyOpenSSL
+- Additional packages from this repository's requirements.txt (see [Additional Requirements](#additional-requirements) section)
 
 ### Odoo Components
 - Odoo source code (specified version)
@@ -261,6 +295,116 @@ sudo -u <username> psql -l
 sudo chown -R <username>:<username> /home/<username>/
 ```
 
+## Additional Requirements
+
+This repository includes a `requirements.txt` file with commonly used Python packages for Odoo development and production environments.
+
+### Included Packages
+
+The requirements.txt includes:
+
+#### **Odoo CLI Tools**
+- `click-odoo` - CLI framework for Odoo scripting
+- `click-odoo-contrib` - Collection of useful Odoo CLI utilities
+
+#### **Enhanced Features**
+- `num2words` - Convert numbers to words (for invoices, checks)
+- `ofxparse` - Parse OFX/QFX banking files
+- `dbfread` - Read DBF files (legacy data import)
+- `ebaysdk` - eBay marketplace integration
+- `firebase-admin` - Firebase/FCM push notifications
+- `pyOpenSSL` - Enhanced SSL/TLS support
+
+#### **PDF and Reporting**
+- `PyPDF2` - PDF manipulation and merging
+- `reportlab` - Advanced PDF generation
+
+#### **Excel/Spreadsheet Support**
+- `xlrd`, `xlwt` - Excel 97-2003 format (.xls)
+- `openpyxl` - Excel 2010+ format (.xlsx)
+- `xlsxwriter` - Enhanced Excel writing with formatting
+
+#### **Data Processing**
+- `pandas` - Data analysis and manipulation
+- `numpy` - Numerical computing
+
+#### **API Integration**
+- `requests` - HTTP library for REST APIs
+- `zeep` - SOAP/WSDL client
+
+#### **Development Tools** (commented out by default)
+- `pytest`, `pytest-odoo` - Testing frameworks
+- `pylint-odoo` - Odoo-specific code linting
+- `black`, `isort` - Code formatting tools
+
+### Automatic Installation
+
+**The script automatically detects and installs the requirements.txt file if it exists in the same directory as the installation script.**
+
+When you run the installation script from the cloned repository, it will:
+1. Install Odoo's built-in requirements.txt
+2. Install common packages (num2words, ofxparse, etc.)
+3. **Automatically detect and install this repository's requirements.txt** if present
+
+No extra steps needed! Just run the script as usual.
+
+### Manual Installation (for existing setups)
+
+If you want to install the requirements.txt on an already installed Odoo instance:
+
+```bash
+# Switch to the Odoo user
+sudo su - <username>
+
+# Activate virtual environment
+source odoo/venv/bin/activate
+
+# Download requirements.txt
+wget https://raw.githubusercontent.com/abdalmola-apps/OdooInstallScript/main/requirements.txt
+
+# Install packages
+pip install -r requirements.txt
+
+# Restart Odoo service
+exit
+sudo systemctl restart <username>-odoo.service
+```
+
+### Installing Specific Packages
+
+```bash
+sudo su - <username>
+source odoo/venv/bin/activate
+
+# Install specific packages
+pip install click-odoo-contrib pandas xlsxwriter
+
+# Or upgrade existing packages
+pip install --upgrade num2words PyPDF2
+```
+
+### Using click-odoo-contrib
+
+After installing `click-odoo-contrib`, you can use powerful CLI commands:
+
+```bash
+# Activate environment
+sudo su - <username>
+source odoo/venv/bin/activate
+
+# Export database
+click-odoo-dropdb DBNAME
+
+# Initialize database with demo data
+click-odoo-initdb -n DBNAME -m base,sale,purchase --demo
+
+# Update modules
+click-odoo-update -d DBNAME -m sale,purchase
+
+# Run Python shell with Odoo environment
+click-odoo-shell -d DBNAME
+```
+
 ## Multiple Instances
 
 To install multiple Odoo instances:
@@ -274,14 +418,44 @@ To install multiple Odoo instances:
    - Configuration file
    - Systemd service
 
-## Requirements File
+## Customizing Python Dependencies
 
-If you need to install additional Python packages:
+### Adding Packages to Your Installation
+
+If you need additional Python packages beyond what's in requirements.txt:
 
 ```bash
+# Switch to Odoo user
+sudo su - <username>
+
+# Activate virtual environment
+source odoo/venv/bin/activate
+
+# Install package
+pip install <package-name>
+
+# Or install with specific version
+pip install <package-name>==<version>
+
+# Restart Odoo to use new packages
+exit
+sudo systemctl restart <username>-odoo.service
+```
+
+### Creating Your Own Requirements File
+
+For production deployments, you may want to create a custom requirements file:
+
+```bash
+# Activate environment
 sudo su - <username>
 source odoo/venv/bin/activate
-pip install <package-name>
+
+# Export currently installed packages
+pip freeze > custom-requirements.txt
+
+# Later, install from your custom file
+pip install -r custom-requirements.txt
 ```
 
 ## Uninstalling
