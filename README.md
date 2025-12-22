@@ -29,7 +29,7 @@ The script installs and configures the following components:
 - Build tools (build-essential, git, wget)
 - Required libraries (libxslt-dev, libzip-dev, libldap2-dev, libsasl2-dev, libpq-dev, libpng-dev, libjpeg-dev)
 - Node.js and NPM
-- wkhtmltopdf (for PDF report generation)
+- wkhtmltopdf 0.12.6.1-2 (patched version for Qt - fixes header/footer rendering issues)
 - LESS CSS compiler and plugins
 
 ### Python Packages (in virtual environment)
@@ -179,6 +179,13 @@ The script generates a configuration file at `/home/<username>/<username>-odoo.c
 - Addons path: includes both standard and custom addons
 - Log file location
 - Data directory location
+
+## Service Configuration
+
+The systemd service includes the following optimizations:
+- **XDG_RUNTIME_DIR**: Set to `/tmp/runtime-<username>` to prevent Qt warnings
+- **Auto-start**: Enabled by default on system boot
+- **PostgreSQL dependency**: Ensures database is ready before Odoo starts
 
 ## Service Management
 

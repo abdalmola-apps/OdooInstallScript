@@ -153,8 +153,10 @@ if step 5 "Install System Dependencies"; then
     sudo apt-get install -y nodejs npm
     sudo npm install -g rtlcss
 
-    echo "Installing wkhtmltopdf..."
-    sudo apt-get install -y wkhtmltopdf
+    echo "Installing wkhtmltopdf (patched version for Qt)..."
+    wget https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-2/wkhtmltox_0.12.6.1-2.jammy_amd64.deb
+    sudo apt install ./wkhtmltox_0.12.6.1-2.jammy_amd64.deb -y
+    rm wkhtmltox_0.12.6.1-2.jammy_amd64.deb
     save_checkpoint 5
 fi
 
@@ -271,6 +273,7 @@ SyslogIdentifier=$OE_USER-odoo
 PermissionsStartOnly=true
 User=$OE_USER
 Group=$OE_USER
+Environment=XDG_RUNTIME_DIR=/tmp/runtime-$OE_USER
 ExecStart="$OE_HOME_EXT/venv/bin/python3" "$OE_HOME_EXT/odoo-bin" -c "$OE_HOME/$OE_CONFIG"
 WorkingDirectory=$OE_HOME_EXT
 StandardOutput=journal+console
