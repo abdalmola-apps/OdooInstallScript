@@ -1,50 +1,100 @@
 #!/bin/bash
 
 # ==============================================================================
-# Odoo Installation and Setup Script
+# Odoo Production Installation Script
 #
-# This script automates the full setup of a new Odoo instance for a
-# specific user, including:
-# - User creation
-# - PostgreSQL user creation and check
-# - Odoo cloning from GitHub
-# - System and Python dependency installation
-# - Python virtual environment creation
-# - Odoo configuration file generation
-# - Systemd service file creation
-# - Correct directory ownership and permissions
-# - Service enablement and start
+# Automates a full production-grade Odoo setup including:
+# - System user & PostgreSQL user (no superuser)
+# - Odoo source cloning & Python venv
+# - Auto-detected wkhtmltopdf for Ubuntu codename + arch
+# - Computed workers/memory limits based on CPU & RAM
+# - Multiple custom addon repos
+# - Logrotate, UFW firewall
+# - Optional Nginx reverse proxy + SSL (delegates to odoo_nginx.sh)
+# - Optional automated backups (delegates to odoo_backup.sh)
+# - Optional swap file
+#
+# Supports resume via checkpoint system.
 #
 # Author: abdalmola
-# Created for a senior Odoo developer to streamline setup tasks.
+# License: LGPL-3
 # ==============================================================================
 
-# ==============================================================================
-# 1. Configuration & User Input
-# ==============================================================================
-read -p "Enter the new username for the Odoo instance: " OE_USER
-read -p "Enter the Odoo version (e.g., 18.0, 17.0): " OE_VERSION
-read -p "Enter the port for this Odoo instance (e.g., 8069): " OE_PORT
-read -p "Enter the Git URL for your custom addons (e.g., https://github.com/myuser/my-custom-addons): " CUSTOM_ADDONS_GIT_URL
+set -euo pipefail
 
-OE_HOME="/home/$OE_USER"
-OE_HOME_EXT="$OE_HOME/odoo"
-OE_CONFIG="$OE_USER-odoo.conf"
-OE_SERVICE="$OE_USER-odoo.service"
-CHECKPOINT_FILE="/tmp/odoo_setup_checkpoint_$OE_USER"
+# ==============================================================================
+# Section 1: Constants & Colors
+# ==============================================================================
+
+readonly SCRIPT_VERSION="2.1.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 
-# Exit on any command failure
-set -e
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
+readonly NC='\033[0m' # No Color
 
 # ==============================================================================
-# 2. Checkpoint System
+# Section 2: Utility Functions
 # ==============================================================================
-function save_checkpoint() {
+
+log_info()    { echo -e "${BLUE}[INFO $(date '+%H:%M:%S')]${NC} $*"; }
+log_warn()    { echo -e "${YELLOW}[WARN $(date '+%H:%M:%S')]${NC} $*"; }
+log_error()   { echo -e "${RED}[ERROR $(date '+%H:%M:%S')]${NC} $*" >&2; }
+log_success() { echo -e "${GREEN}[OK   $(date '+%H:%M:%S')]${NC} $*"; }
+
+generate_password() {
+    local len="${1:-24}"
+    openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c "$len"
+}
+
+# --- Validators ---
+
+validate_username() {
+    [[ "$1" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]
+}
+
+validate_port() {
+    [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1024 && $1 <= 65535 ))
+}
+
+validate_version() {
+    [[ "$1" =~ ^[0-9]+\.0$ ]]
+}
+
+validate_git_url() {
+    [[ "$1" =~ ^https://.*\.git$ ]] || [[ "$1" =~ ^git@.*\.git$ ]] || [[ "$1" =~ ^https://.+ ]]
+}
+
+# --- System Info ---
+
+get_ubuntu_codename() {
+    if [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        echo "${VERSION_CODENAME:-unknown}"
+    else
+        echo "unknown"
+    fi
+}
+
+get_total_ram_mb() {
+    awk '/MemTotal/ { printf "%d", $2/1024 }' /proc/meminfo
+}
+
+get_cpu_cores() {
+    nproc
+}
+
+# --- Checkpoint System ---
+
+save_checkpoint() {
     echo "$1" > "$CHECKPOINT_FILE"
 }
 
-function get_last_checkpoint() {
+get_last_checkpoint() {
     if [ -f "$CHECKPOINT_FILE" ]; then
         cat "$CHECKPOINT_FILE"
     else
@@ -52,277 +102,777 @@ function get_last_checkpoint() {
     fi
 }
 
-LAST_CHECKPOINT=$(get_last_checkpoint)
-CURRENT_STEP=0
-
-function step() {
-    CURRENT_STEP=$1
-    if [ "$LAST_CHECKPOINT" -lt "$CURRENT_STEP" ]; then
-        echo "--- Starting Step $CURRENT_STEP: $2 ---"
+step() {
+    local step_num="$1"
+    local step_desc="$2"
+    CURRENT_STEP="$step_num"
+    if [ "$LAST_CHECKPOINT" -lt "$step_num" ]; then
+        echo ""
+        log_info "=== Step $step_num: $step_desc ==="
         return 0
     else
-        echo "--- Skipping Step $CURRENT_STEP: $2 (Already completed) ---"
+        log_warn "Skipping Step $step_num: $step_desc (already completed)"
         return 1
     fi
 }
 
+# --- Trap / Cleanup ---
+
+cleanup() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        log_error "Script failed at step ${CURRENT_STEP:-unknown} (exit code: $exit_code)"
+        log_error "To resume, re-run the script — it will continue from step $((CURRENT_STEP))"
+        log_error "Checkpoint file: ${CHECKPOINT_FILE:-N/A}"
+    fi
+}
+
+trap cleanup ERR INT TERM
+
 # ==============================================================================
-# 3. Installation Steps
+# Section 3: Input Collection & Validation
+# ==============================================================================
+
+echo -e "${BLUE}"
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║         Odoo Production Installation Script v${SCRIPT_VERSION}       ║"
+echo "╚══════════════════════════════════════════════════════════╝"
+echo -e "${NC}"
+
+# --- Username ---
+while true; do
+    read -rp "Enter the Odoo system username: " OE_USER
+    if [ -z "$OE_USER" ]; then
+        log_error "Username cannot be empty."
+    elif ! validate_username "$OE_USER"; then
+        log_error "Invalid username. Use only letters, digits, and underscores (must start with letter or underscore)."
+    else
+        break
+    fi
+done
+
+# --- Version ---
+while true; do
+    read -rp "Enter the Odoo version [18.0]: " OE_VERSION
+    OE_VERSION="${OE_VERSION:-18.0}"
+    if ! validate_version "$OE_VERSION"; then
+        log_error "Invalid version format. Expected format: XX.0 (e.g., 18.0, 17.0)"
+    else
+        break
+    fi
+done
+
+# --- Port ---
+while true; do
+    read -rp "Enter the Odoo HTTP port [8069]: " OE_PORT
+    OE_PORT="${OE_PORT:-8069}"
+    if ! validate_port "$OE_PORT"; then
+        log_error "Invalid port. Must be a number between 1024 and 65535."
+    else
+        break
+    fi
+done
+
+# --- Nginx ---
+while true; do
+    read -rp "Install Nginx as reverse proxy? (yes/no) [no]: " INSTALL_NGINX
+    INSTALL_NGINX="${INSTALL_NGINX:-no}"
+    INSTALL_NGINX="${INSTALL_NGINX,,}" # lowercase
+    if [[ "$INSTALL_NGINX" == "yes" || "$INSTALL_NGINX" == "no" ]]; then
+        break
+    fi
+    log_error "Please answer 'yes' or 'no'."
+done
+
+# --- Domain & Email (required if Nginx — validated by odoo_nginx.sh) ---
+OE_DOMAIN=""
+CERTBOT_EMAIL=""
+if [ "$INSTALL_NGINX" = "yes" ]; then
+    read -rp "Enter the domain name (e.g., odoo.example.com): " OE_DOMAIN
+    read -rp "Enter email for Let's Encrypt SSL certificate: " CERTBOT_EMAIL
+fi
+
+# --- Custom Addon Repos ---
+read -rp "Enter custom addon Git URLs (comma-separated, or leave empty): " CUSTOM_ADDONS_INPUT
+IFS=',' read -ra CUSTOM_ADDONS_GIT_URLS <<< "$CUSTOM_ADDONS_INPUT"
+
+# Validate each URL (skip empty entries)
+VALID_ADDON_URLS=()
+for url in "${CUSTOM_ADDONS_GIT_URLS[@]}"; do
+    url="$(echo "$url" | xargs)" # trim whitespace
+    [ -z "$url" ] && continue
+    if ! validate_git_url "$url"; then
+        log_error "Invalid Git URL: $url"
+        log_error "Expected format: https://github.com/user/repo or git@github.com:user/repo.git"
+        exit 1
+    fi
+    VALID_ADDON_URLS+=("$url")
+done
+
+# --- Swap ---
+RAM_MB=$(get_total_ram_mb)
+SWAP_DEFAULT="no"
+if [ "$RAM_MB" -lt 4096 ]; then
+    SWAP_DEFAULT="yes"
+    log_warn "Low RAM detected (${RAM_MB}MB). Swap is recommended."
+fi
+
+while true; do
+    read -rp "Set up swap file? (yes/no) [$SWAP_DEFAULT]: " SETUP_SWAP
+    SETUP_SWAP="${SETUP_SWAP:-$SWAP_DEFAULT}"
+    SETUP_SWAP="${SETUP_SWAP,,}"
+    if [[ "$SETUP_SWAP" == "yes" || "$SETUP_SWAP" == "no" ]]; then
+        break
+    fi
+    log_error "Please answer 'yes' or 'no'."
+done
+
+# --- Automated Backups ---
+while true; do
+    read -rp "Set up automated daily backups? (yes/no) [yes]: " SETUP_BACKUP
+    SETUP_BACKUP="${SETUP_BACKUP:-yes}"
+    SETUP_BACKUP="${SETUP_BACKUP,,}"
+    if [[ "$SETUP_BACKUP" == "yes" || "$SETUP_BACKUP" == "no" ]]; then
+        break
+    fi
+    log_error "Please answer 'yes' or 'no'."
+done
+
+# --- Backup Options (if backups enabled) ---
+BACKUP_RETENTION=30
+BACKUP_FILESTORE="yes"
+BACKUP_HOUR="02:00"
+if [ "$SETUP_BACKUP" = "yes" ]; then
+    while true; do
+        read -rp "Include filestore in backups? (yes/no) [yes]: " BACKUP_FILESTORE
+        BACKUP_FILESTORE="${BACKUP_FILESTORE:-yes}"
+        BACKUP_FILESTORE="${BACKUP_FILESTORE,,}"
+        if [[ "$BACKUP_FILESTORE" == "yes" || "$BACKUP_FILESTORE" == "no" ]]; then
+            break
+        fi
+        log_error "Please answer 'yes' or 'no'."
+    done
+
+    while true; do
+        read -rp "Backup retention in days [30]: " BACKUP_RETENTION
+        BACKUP_RETENTION="${BACKUP_RETENTION:-30}"
+        if [[ "$BACKUP_RETENTION" =~ ^[0-9]+$ ]] && [ "$BACKUP_RETENTION" -ge 1 ]; then
+            break
+        fi
+        log_error "Must be a positive number."
+    done
+
+    while true; do
+        read -rp "Backup time (HH:MM, 24h format) [02:00]: " BACKUP_HOUR
+        BACKUP_HOUR="${BACKUP_HOUR:-02:00}"
+        if [[ "$BACKUP_HOUR" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+            break
+        fi
+        log_error "Invalid time format. Use HH:MM (e.g., 02:00, 23:30)."
+    done
+fi
+
+# ==============================================================================
+# Derived Variables
+# ==============================================================================
+
+OE_HOME="/home/$OE_USER"
+OE_HOME_EXT="$OE_HOME/odoo"
+OE_CONFIG="${OE_USER}-odoo.conf"
+OE_SERVICE="${OE_USER}-odoo.service"
+OE_DATA_DIR="$OE_HOME/data"
+OE_CUSTOM_ADDONS_DIR="$OE_HOME/custom-addons"
+OE_LONGPOLLING_PORT=$((OE_PORT + 1))
+ADMIN_PASSWD="$(generate_password 24)"
+CHECKPOINT_FILE="/tmp/odoo_setup_checkpoint_${OE_USER}"
+
+LAST_CHECKPOINT=$(get_last_checkpoint)
+CURRENT_STEP=0
+
+# Compute workers & memory limits
+CPU_CORES=$(get_cpu_cores)
+WORKERS=$(( CPU_CORES * 2 + 1 ))
+MAX_WORKERS_BY_RAM=$(( RAM_MB / 256 ))
+if [ "$WORKERS" -gt "$MAX_WORKERS_BY_RAM" ]; then
+    WORKERS="$MAX_WORKERS_BY_RAM"
+fi
+if [ "$WORKERS" -lt 2 ]; then
+    WORKERS=2
+fi
+
+MAX_CRON_THREADS=1
+LIMIT_MEMORY_SOFT=$(( (RAM_MB * 1024 * 1024 * 8 / 10) / (WORKERS + MAX_CRON_THREADS + 1) ))
+LIMIT_MEMORY_HARD=$(( LIMIT_MEMORY_SOFT * 12 / 10 ))
+DB_MAXCONN=$(( WORKERS * 2 + 4 ))
+
+# ==============================================================================
+# Confirmation Summary
+# ==============================================================================
+
+echo ""
+echo -e "${BLUE}╔══════════════════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║                  Installation Summary                   ║${NC}"
+echo -e "${BLUE}╠══════════════════════════════════════════════════════════╣${NC}"
+echo -e "${BLUE}║${NC} Username:        $OE_USER"
+echo -e "${BLUE}║${NC} Odoo Version:    $OE_VERSION"
+echo -e "${BLUE}║${NC} HTTP Port:       $OE_PORT"
+echo -e "${BLUE}║${NC} Longpolling:     $OE_LONGPOLLING_PORT"
+echo -e "${BLUE}║${NC} Workers:         $WORKERS (CPU: $CPU_CORES, RAM: ${RAM_MB}MB)"
+echo -e "${BLUE}║${NC} Nginx + SSL:     $INSTALL_NGINX"
+if [ "$INSTALL_NGINX" = "yes" ]; then
+echo -e "${BLUE}║${NC} Domain:          $OE_DOMAIN"
+echo -e "${BLUE}║${NC} Certbot Email:   $CERTBOT_EMAIL"
+fi
+echo -e "${BLUE}║${NC} Addon Repos:     ${#VALID_ADDON_URLS[@]}"
+echo -e "${BLUE}║${NC} Swap:            $SETUP_SWAP"
+echo -e "${BLUE}║${NC} Daily Backups:   $SETUP_BACKUP"
+if [ "$SETUP_BACKUP" = "yes" ]; then
+echo -e "${BLUE}║${NC}   Filestore:     $BACKUP_FILESTORE"
+echo -e "${BLUE}║${NC}   Retention:     ${BACKUP_RETENTION} days"
+echo -e "${BLUE}║${NC}   Schedule:      Daily at $BACKUP_HOUR"
+fi
+echo -e "${BLUE}║${NC} Home Dir:        $OE_HOME"
+echo -e "${BLUE}╚══════════════════════════════════════════════════════════╝${NC}"
+echo ""
+
+read -rp "Proceed with installation? (yes/no): " CONFIRM
+CONFIRM="${CONFIRM,,}"
+if [ "$CONFIRM" != "yes" ]; then
+    log_warn "Installation cancelled by user."
+    exit 0
+fi
+
+echo ""
+log_info "Starting installation..."
+
+# ==============================================================================
+# Section 4: Steps 1-3 — System Setup
 # ==============================================================================
 
 # Step 1: Check & Install PostgreSQL
 if step 1 "Check & Install PostgreSQL"; then
-    echo "Checking for PostgreSQL installation..."
     if ! command -v psql &> /dev/null; then
-        echo "PostgreSQL not found. Installing now..."
-        sudo apt-get update
-        sudo apt-get install postgresql postgresql-contrib -y
+        log_info "PostgreSQL not found. Installing..."
+        sudo apt-get update -qq
+        sudo apt-get install -y postgresql postgresql-contrib
     else
-        echo "PostgreSQL is already installed. Skipping installation."
+        log_success "PostgreSQL is already installed."
     fi
     save_checkpoint 1
 fi
 
 # Step 2: Set Timezone
-if step 2 "Set Timezone"; then
-    echo "Setting system timezone to Asia/Riyadh..."
+if step 2 "Set Timezone to Asia/Riyadh"; then
     sudo timedatectl set-timezone Asia/Riyadh
-    echo "System timezone set successfully."
+    log_success "System timezone set to Asia/Riyadh."
     save_checkpoint 2
 fi
 
-# Step 3: Create System User and PostgreSQL User
-if step 3 "Create System User and PostgreSQL User"; then
-    echo "Creating system user '$OE_USER'..."
-    # Check if the system group exists. If not, create it first.
+# Step 3: Create System User & PostgreSQL User
+if step 3 "Create System User & PostgreSQL User"; then
+    # System group
     if ! getent group "$OE_USER" >/dev/null; then
-        echo "Group '$OE_USER' does not exist. Creating it now..."
+        log_info "Creating system group '$OE_USER'..."
         sudo addgroup --system "$OE_USER"
     fi
 
-    # Check if the user exists. If not, create them.
+    # System user
     if ! id -u "$OE_USER" >/dev/null 2>&1; then
-        echo "User '$OE_USER' does not exist. Creating it now..."
-        sudo adduser --system --shell=/bin/bash --gecos "Odoo user" --disabled-password --home "$OE_HOME" --ingroup "$OE_USER" "$OE_USER"
-        sudo usermod -L "$OE_USER" # Lock the user account
-        echo "User '$OE_USER' created successfully."
+        log_info "Creating system user '$OE_USER'..."
+        sudo adduser --system --shell=/bin/bash --gecos "Odoo user" \
+            --disabled-password --home "$OE_HOME" --ingroup "$OE_USER" "$OE_USER"
+        sudo usermod -L "$OE_USER"
     else
-        # If the user exists, ensure they are in the correct group.
-        echo "User '$OE_USER' already exists. Ensuring they are in group '$OE_USER'..."
-        sudo usermod -a -G "$OE_USER" "$OE_USER"
+        log_success "System user '$OE_USER' already exists."
+        sudo usermod -a -G "$OE_USER" "$OE_USER" 2>/dev/null || true
     fi
 
-    echo "Creating PostgreSQL user '$OE_USER' with superuser rights..."
-    # Check if the user already exists in PostgreSQL
-    if sudo -u postgres psql -tAc "SELECT 1 FROM pg_user WHERE usename = '$OE_USER'" | grep -q 1; then
-        echo "PostgreSQL user '$OE_USER' already exists. Skipping creation."
+    # PostgreSQL user — no superuser for security
+    if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '$OE_USER'" | grep -q 1; then
+        log_success "PostgreSQL user '$OE_USER' already exists."
     else
-        sudo -u postgres createuser --createdb --superuser --no-createrole "$OE_USER"
-        echo "PostgreSQL user '$OE_USER' created successfully."
+        log_info "Creating PostgreSQL user '$OE_USER' (no superuser)..."
+        sudo -u postgres createuser --createdb --no-superuser --no-createrole "$OE_USER"
     fi
 
-    # Set the timezone for the new PostgreSQL user
-    echo "Setting PostgreSQL timezone for user '$OE_USER'..."
+    # Set timezone for PostgreSQL user
     sudo -u postgres psql -c "ALTER USER \"$OE_USER\" SET TIMEZONE = 'Asia/Riyadh';"
-    echo "PostgreSQL timezone set."
+    log_success "PostgreSQL user configured."
     save_checkpoint 3
 fi
 
-# Step 4: Git Clone Odoo Source Code
-if step 4 "Git Clone Odoo Source Code"; then
-    # Check if the Odoo directory already exists
+# ==============================================================================
+# Section 5: Steps 4-7 — Odoo & Dependencies
+# ==============================================================================
+
+# Step 4: Clone Odoo Source
+if step 4 "Clone Odoo Source Code"; then
     if [ -d "$OE_HOME_EXT" ]; then
-        echo "Odoo directory already exists. Skipping cloning."
+        log_success "Odoo directory already exists at $OE_HOME_EXT. Skipping."
     else
-        echo "Cloning Odoo version $OE_VERSION to $OE_HOME_EXT..."
-        sudo git clone --depth 1 --branch "$OE_VERSION" https://www.github.com/odoo/odoo "$OE_HOME_EXT"
-        # --- NEW: Set ownership to the correct user
+        log_info "Cloning Odoo $OE_VERSION..."
+        sudo git clone --depth 1 --branch "$OE_VERSION" \
+            "https://www.github.com/odoo/odoo" "$OE_HOME_EXT"
         sudo chown -R "$OE_USER:$OE_USER" "$OE_HOME_EXT"
-        echo "Odoo cloned."
+        log_success "Odoo $OE_VERSION cloned."
     fi
     save_checkpoint 4
 fi
 
-# Step 5: Install System Dependencies
-if step 5 "Install System Dependencies"; then
-    echo "Installing core system dependencies..."
-    sudo apt-get update
-    sudo apt-get upgrade -y
-    sudo apt-get install -y git python3-cffi build-essential wget python3-dev python3-venv python3-wheel libxslt-dev libzip-dev libldap2-dev libsasl2-dev python3-setuptools node-less libpng-dev libjpeg-dev gdebi libpq-dev
+# Step 5: System Dependencies & wkhtmltopdf
+if step 5 "Install System Dependencies & wkhtmltopdf"; then
+    log_info "Updating package lists..."
+    sudo apt-get update -qq
 
-    echo "Installing NodeJS and NPM..."
-    sudo apt-get install -y nodejs npm
-    sudo npm install -g rtlcss
+    log_info "Installing system dependencies..."
+    sudo apt-get install -y \
+        git python3-cffi build-essential wget curl \
+        python3-dev python3-venv python3-wheel python3-setuptools \
+        libxslt-dev libzip-dev libldap2-dev libsasl2-dev \
+        libpng-dev libjpeg-dev libpq-dev \
+        gdebi-core
 
-    echo "Installing wkhtmltopdf (patched version for Qt)..."
-    wget https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-2/wkhtmltox_0.12.6.1-2.jammy_amd64.deb
-    sudo apt install ./wkhtmltox_0.12.6.1-2.jammy_amd64.deb -y
-    rm wkhtmltox_0.12.6.1-2.jammy_amd64.deb
+    # Auto-detect wkhtmltopdf for current Ubuntu codename + architecture
+    CODENAME="$(get_ubuntu_codename)"
+    ARCH="$(dpkg --print-architecture)"
+    WKHTMLTOPDF_VERSION="0.12.6.1-2"
+
+    case "$CODENAME" in
+        focal|jammy|noble)
+            WKHTMLTOPDF_URL="https://github.com/wkhtmltopdf/packaging/releases/download/${WKHTMLTOPDF_VERSION}/wkhtmltox_${WKHTMLTOPDF_VERSION}.${CODENAME}_${ARCH}.deb"
+            ;;
+        *)
+            log_warn "Unsupported Ubuntu codename '$CODENAME'. Falling back to jammy."
+            WKHTMLTOPDF_URL="https://github.com/wkhtmltopdf/packaging/releases/download/${WKHTMLTOPDF_VERSION}/wkhtmltox_${WKHTMLTOPDF_VERSION}.jammy_${ARCH}.deb"
+            ;;
+    esac
+
+    if command -v wkhtmltopdf &> /dev/null; then
+        log_success "wkhtmltopdf is already installed."
+    else
+        log_info "Downloading wkhtmltopdf for ${CODENAME}/${ARCH}..."
+        WKHTMLTOPDF_DEB="/tmp/wkhtmltox_${WKHTMLTOPDF_VERSION}.deb"
+        wget -q "$WKHTMLTOPDF_URL" -O "$WKHTMLTOPDF_DEB"
+        sudo apt install -y "$WKHTMLTOPDF_DEB"
+        rm -f "$WKHTMLTOPDF_DEB"
+        log_success "wkhtmltopdf installed."
+    fi
+
     save_checkpoint 5
 fi
 
-# Step 6: Create Virtual Environment and Install Python Dependencies
-if step 6 "Create Virtual Environment and Install Python Dependencies"; then
-    # Create the virtual environment only if the directory does not exist.
+# Step 6: Python Virtual Environment & Dependencies
+if step 6 "Create Virtual Environment & Install Python Dependencies"; then
     if [ ! -d "$OE_HOME_EXT/venv" ]; then
-        echo "Creating Python virtual environment..."
-        sudo su - "$OE_USER" -c "
-            python3 -m venv \"$OE_HOME_EXT/venv\"
-            echo \"Virtual environment created.\"
-        "
+        log_info "Creating Python virtual environment..."
+        sudo -u "$OE_USER" python3 -m venv "$OE_HOME_EXT/venv"
     else
-        echo "Virtual environment already exists. Skipping creation."
+        log_success "Virtual environment already exists."
     fi
 
-    # Install Python packages regardless of whether the venv was just created or already existed.
-    sudo su - "$OE_USER" -c "
-        source \"$OE_HOME_EXT/venv/bin/activate\"
-        echo \"Installing Python packages from Odoo requirements.txt...\"
-        pip3 install --no-cache-dir -r \"$OE_HOME_EXT/requirements.txt\"
-        echo \"Installing additional Python packages...\"
-        pip3 install --no-cache-dir num2words ofxparse dbfread ebaysdk firebase_admin pyOpenSSL
-        echo \"Python virtual environment setup complete.\"
-    "
+    log_info "Installing Python packages from Odoo requirements..."
+    sudo -u "$OE_USER" "$OE_HOME_EXT/venv/bin/pip" install --no-cache-dir \
+        -r "$OE_HOME_EXT/requirements.txt"
 
-    # Install additional requirements from script directory if exists
+    log_info "Installing additional Python packages..."
+    sudo -u "$OE_USER" "$OE_HOME_EXT/venv/bin/pip" install --no-cache-dir \
+        num2words ofxparse dbfread ebaysdk firebase_admin pyOpenSSL
+
+    # Install additional requirements from script directory if present
     if [ -f "$SCRIPT_DIR/requirements.txt" ]; then
-        echo "Found additional requirements.txt in script directory. Installing..."
-        sudo su - "$OE_USER" -c "
-            source \"$OE_HOME_EXT/venv/bin/activate\"
-            pip3 install --no-cache-dir -r \"$SCRIPT_DIR/requirements.txt\"
-            echo \"Additional requirements installed successfully.\"
-        "
-    else
-        echo "No additional requirements.txt found in script directory. Skipping."
+        log_info "Installing extra requirements from $SCRIPT_DIR/requirements.txt..."
+        sudo -u "$OE_USER" "$OE_HOME_EXT/venv/bin/pip" install --no-cache-dir \
+            -r "$SCRIPT_DIR/requirements.txt"
     fi
 
+    log_success "Python dependencies installed."
     save_checkpoint 6
 fi
 
-# Step 7: Install LESS CSS dependencies
-if step 7 "Install LESS CSS dependencies"; then
-    echo "Installing LESS CSS dependencies..."
-    sudo npm install -g less less-plugin-clean-css
+# Step 7: Node.js — LESS & rtlcss
+if step 7 "Install LESS & rtlcss"; then
+    log_info "Installing Node.js and npm..."
+    sudo apt-get install -y nodejs npm
+
+    log_info "Installing LESS and rtlcss globally..."
+    sudo npm install -g less less-plugin-clean-css rtlcss
+    log_success "Node.js dependencies installed."
     save_checkpoint 7
 fi
 
-# Step 8: Create Odoo Directories
+# ==============================================================================
+# Section 6: Steps 8-10 — Directories & Repos
+# ==============================================================================
+
+# Step 8: Create Directories
 if step 8 "Create Odoo Directories"; then
-    echo "Creating Odoo data and custom addons directories..."
-    OE_DATA_DIR="$OE_HOME/data"
-    OE_CUSTOM_ADDONS_DIR="$OE_HOME/custom-addons"
-    mkdir -p "$OE_DATA_DIR"
-    mkdir -p "$OE_CUSTOM_ADDONS_DIR"
+    log_info "Creating data and custom-addons directories..."
+    sudo mkdir -p "$OE_DATA_DIR" "$OE_CUSTOM_ADDONS_DIR"
+    sudo chown -R "$OE_USER:$OE_USER" "$OE_DATA_DIR" "$OE_CUSTOM_ADDONS_DIR"
+    log_success "Directories created."
     save_checkpoint 8
 fi
 
-# Step 9: Generate SSH Key for User
-if step 9 "Generate SSH Key for User"; then
-    echo "Generating SSH key for user '$OE_USER'..."
+# Step 9: SSH Key Generation
+if step 9 "Generate SSH Key"; then
     SSH_DIR="$OE_HOME/.ssh"
-    # Check if .ssh directory and key already exist
     if [ ! -d "$SSH_DIR" ]; then
+        log_info "Generating SSH key for '$OE_USER'..."
         sudo mkdir -p "$SSH_DIR"
-        sudo chown -R "$OE_USER:$OE_USER" "$SSH_DIR"
+        sudo chown "$OE_USER:$OE_USER" "$SSH_DIR"
         sudo chmod 700 "$SSH_DIR"
-        sudo -u "$OE_USER" ssh-keygen -t rsa -b 4096 -f "$SSH_DIR/id_rsa" -N "" -q
-        echo "SSH key generated and saved to $SSH_DIR/id_rsa"
+        sudo -u "$OE_USER" ssh-keygen -t ed25519 -f "$SSH_DIR/id_ed25519" -N "" -q
+        log_success "SSH key generated at $SSH_DIR/id_ed25519"
+        echo ""
+        log_info "Public key (add to your Git hosting):"
+        sudo cat "$SSH_DIR/id_ed25519.pub"
+        echo ""
     else
-        echo ".ssh directory already exists. Skipping SSH key generation."
+        log_success "SSH directory already exists. Skipping key generation."
     fi
     save_checkpoint 9
 fi
 
-# Step 10: Clone Custom Odoo Addons
-if step 10 "Clone Custom Odoo Addons"; then
-    echo "Cloning custom Odoo addons from $CUSTOM_ADDONS_GIT_URL..."
-    CUSTOM_ADDONS_DIR_NAME=$(basename "$CUSTOM_ADDONS_GIT_URL" .git)
-    CUSTOM_ADDONS_PATH="$OE_CUSTOM_ADDONS_DIR/$CUSTOM_ADDONS_DIR_NAME"
-    if [ -d "$CUSTOM_ADDONS_PATH" ]; then
-        echo "Custom addons directory '$CUSTOM_ADDONS_DIR_NAME' already exists. Skipping cloning."
+# Step 10: Clone Custom Addon Repos
+if step 10 "Clone Custom Addon Repos"; then
+    # Build addons path starting with Odoo core addons
+    ADDONS_PATH="$OE_HOME_EXT/addons"
+
+    if [ ${#VALID_ADDON_URLS[@]} -gt 0 ]; then
+        for url in "${VALID_ADDON_URLS[@]}"; do
+            REPO_NAME="$(basename "$url" .git)"
+            REPO_PATH="$OE_CUSTOM_ADDONS_DIR/$REPO_NAME"
+
+            if [ -d "$REPO_PATH" ]; then
+                log_success "Addon repo '$REPO_NAME' already exists. Skipping."
+            else
+                log_info "Cloning addon repo: $url ..."
+                sudo -u "$OE_USER" git clone "$url" "$REPO_PATH" || {
+                    log_warn "Failed to clone $url — trying with sudo..."
+                    sudo git clone "$url" "$REPO_PATH"
+                    sudo chown -R "$OE_USER:$OE_USER" "$REPO_PATH"
+                }
+            fi
+
+            ADDONS_PATH="$ADDONS_PATH,$REPO_PATH"
+        done
     else
-        sudo git clone "$CUSTOM_ADDONS_GIT_URL" "$CUSTOM_ADDONS_PATH"
-        sudo chown -R "$OE_USER:$OE_USER" "$CUSTOM_ADDONS_PATH"
-        echo "Custom addons cloned successfully to $CUSTOM_ADDONS_PATH"
+        # Add the custom-addons directory even if no repos were cloned
+        ADDONS_PATH="$ADDONS_PATH,$OE_CUSTOM_ADDONS_DIR"
     fi
+
+    log_success "Addon repos configured. Addons path: $ADDONS_PATH"
     save_checkpoint 10
 fi
 
-# Step 11: Create Odoo Configuration File
+# ==============================================================================
+# Section 7: Steps 11-12 — Config & Service
+# ==============================================================================
+
+# Step 11: Odoo Configuration File
 if step 11 "Create Odoo Configuration File"; then
-    echo "Creating Odoo configuration file at $OE_HOME/$OE_CONFIG..."
-    sudo touch "$OE_HOME/$OE_CONFIG"
-    sudo chown "$OE_USER:$OE_USER" "$OE_HOME/$OE_CONFIG"
-    cat << EOF | sudo tee "$OE_HOME/$OE_CONFIG" > /dev/null
+    log_info "Writing config to $OE_HOME/$OE_CONFIG..."
+    sudo tee "$OE_HOME/$OE_CONFIG" > /dev/null <<ODOO_CONF
 [options]
-; This is the password that allows database operations:
-admin_passwd = admin_password
+admin_passwd = $ADMIN_PASSWD
 db_host = False
 db_port = False
 db_user = $OE_USER
 db_password = False
 http_port = $OE_PORT
-xmlrpc_port = $OE_PORT
-; Specify the addons path. Add your custom addons here.
-addons_path = $OE_HOME_EXT/addons,$OE_CUSTOM_ADDONS_DIR
-logfile = $OE_DATA_DIR/odoo-server.log
+longpolling_port = $OE_LONGPOLLING_PORT
+
+addons_path = $ADDONS_PATH
 data_dir = $OE_DATA_DIR
-EOF
-    echo "Configuration file created successfully."
+logfile = $OE_DATA_DIR/odoo-server.log
+
+; Performance tuning (auto-computed: CPU=$CPU_CORES, RAM=${RAM_MB}MB)
+workers = $WORKERS
+max_cron_threads = $MAX_CRON_THREADS
+limit_memory_soft = $LIMIT_MEMORY_SOFT
+limit_memory_hard = $LIMIT_MEMORY_HARD
+limit_time_cpu = 600
+limit_time_real = 1200
+db_maxconn = $DB_MAXCONN
+
+; Security (proxy_mode set by odoo_nginx.sh if Nginx is enabled)
+proxy_mode = False
+list_db = False
+ODOO_CONF
+
+    # Secure the config file — readable only by odoo user and root
+    sudo chown "$OE_USER:$OE_USER" "$OE_HOME/$OE_CONFIG"
+    sudo chmod 640 "$OE_HOME/$OE_CONFIG"
+
+    log_success "Configuration file created with secure permissions (640)."
     save_checkpoint 11
 fi
 
-# Step 12: Create Systemd Service File
+# Step 12: Systemd Service File
 if step 12 "Create Systemd Service File"; then
-    echo "Creating systemd service file at /etc/systemd/system/$OE_SERVICE..."
-    cat << EOF | sudo tee "/etc/systemd/system/$OE_SERVICE" > /dev/null
+    log_info "Writing service file to /etc/systemd/system/$OE_SERVICE..."
+    sudo tee "/etc/systemd/system/$OE_SERVICE" > /dev/null <<SERVICE_CONF
 [Unit]
-Description=Odoo Server
+Description=Odoo $OE_VERSION ($OE_USER)
 Requires=postgresql.service
 After=network.target postgresql.service
 
 [Service]
 Type=simple
 SyslogIdentifier=$OE_USER-odoo
-PermissionsStartOnly=true
 User=$OE_USER
 Group=$OE_USER
+
 Environment=XDG_RUNTIME_DIR=/tmp/runtime-$OE_USER
-ExecStart="$OE_HOME_EXT/venv/bin/python3" "$OE_HOME_EXT/odoo-bin" -c "$OE_HOME/$OE_CONFIG"
+Environment="NODE_OPTIONS=--max-old-space-size=256 --optimize-for-size --no-opt"
+
+ExecStart=$OE_HOME_EXT/venv/bin/python3 $OE_HOME_EXT/odoo-bin -c $OE_HOME/$OE_CONFIG
 WorkingDirectory=$OE_HOME_EXT
+
 StandardOutput=journal+console
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
-EOF
-    echo "Systemd service file created."
+SERVICE_CONF
+
+    sudo chmod 644 "/etc/systemd/system/$OE_SERVICE"
+    sudo chown root:root "/etc/systemd/system/$OE_SERVICE"
+
+    log_success "Systemd service file created."
     save_checkpoint 12
 fi
 
-# Step 13: Set Ownership and Permissions
-if step 13 "Set Ownership and Permissions"; then
-    echo "Setting ownership and permissions for Odoo directories..."
+# ==============================================================================
+# Section 8: Steps 13-16 — Permissions, Logrotate, Nginx (via script), Firewall
+# ==============================================================================
+
+# Step 13: Set Ownership & Permissions
+if step 13 "Set Ownership & Permissions"; then
+    log_info "Setting directory ownership..."
     sudo chown -R "$OE_USER:$OE_USER" "$OE_HOME_EXT"
     sudo chown -R "$OE_USER:$OE_USER" "$OE_DATA_DIR"
     sudo chown -R "$OE_USER:$OE_USER" "$OE_CUSTOM_ADDONS_DIR"
-
-    # Secure the service file
-    sudo chmod 755 "/etc/systemd/system/$OE_SERVICE"
-    sudo chown root: "/etc/systemd/system/$OE_SERVICE"
+    log_success "Permissions set."
     save_checkpoint 13
 fi
 
-# Step 14: Start and Enable Odoo Service
-if step 14 "Start and Enable Odoo Service"; then
-    echo "Reloading systemd daemon and starting service..."
-    sudo systemctl daemon-reload
-    sudo systemctl enable "$OE_SERVICE"
-    sudo systemctl start "$OE_SERVICE"
+# Step 14: Logrotate
+if step 14 "Configure Logrotate"; then
+    log_info "Creating logrotate config for Odoo logs..."
+    sudo tee "/etc/logrotate.d/${OE_USER}-odoo" > /dev/null <<LOGROTATE_CONF
+$OE_DATA_DIR/odoo-server.log {
+    weekly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su $OE_USER $OE_USER
+}
+LOGROTATE_CONF
+
+    log_success "Logrotate configured (weekly, 12 rotations)."
     save_checkpoint 14
 fi
 
-echo "Setup is complete!"
-echo "You can check the service status with: sudo systemctl status $OE_SERVICE"
-echo "The Odoo server should be accessible on port $OE_PORT."
-# Remove checkpoint file upon successful completion
-rm "$CHECKPOINT_FILE"
+# Step 15: Nginx + Let's Encrypt SSL (conditional — delegates to odoo_nginx.sh)
+if step 15 "Configure Nginx & SSL"; then
+    if [ "$INSTALL_NGINX" = "yes" ]; then
+        NGINX_SCRIPT="$SCRIPT_DIR/odoo_nginx.sh"
+
+        if [ ! -f "$NGINX_SCRIPT" ]; then
+            log_error "odoo_nginx.sh not found at $NGINX_SCRIPT"
+            log_error "Ensure odoo_nginx.sh is in the same directory as this script."
+            exit 1
+        fi
+
+        log_info "Running odoo_nginx.sh..."
+        sudo bash "$NGINX_SCRIPT" \
+            -u "$OE_USER" \
+            -d "$OE_DOMAIN" \
+            -e "$CERTBOT_EMAIL" \
+            -p "$OE_PORT" \
+            -l "$OE_LONGPOLLING_PORT"
+
+        log_success "Nginx configured via odoo_nginx.sh."
+    else
+        log_info "Nginx installation skipped (not selected)."
+    fi
+    save_checkpoint 15
+fi
+
+# Step 16: UFW Firewall
+if step 16 "Configure UFW Firewall"; then
+    log_info "Configuring UFW firewall..."
+    sudo apt-get install -y ufw
+
+    sudo ufw allow OpenSSH
+    sudo ufw allow 80/tcp
+    sudo ufw allow 443/tcp
+
+    # Only allow direct Odoo port if Nginx is NOT installed
+    if [ "$INSTALL_NGINX" != "yes" ]; then
+        sudo ufw allow "$OE_PORT/tcp"
+        log_info "Allowed direct access on port $OE_PORT (no Nginx)."
+    fi
+
+    sudo ufw --force enable
+    log_success "UFW firewall enabled."
+    save_checkpoint 16
+fi
+
+# ==============================================================================
+# Section 9: Steps 17-19 — Swap, Service Start & Backups
+# ==============================================================================
+
+# Step 17: Swap File (conditional)
+if step 17 "Set Up Swap File"; then
+    if [ "$SETUP_SWAP" = "yes" ]; then
+        if swapon --show | grep -q '/swapfile'; then
+            log_success "Swap file already exists. Skipping."
+        else
+            # Swap size = min(RAM_MB, 4096)MB
+            SWAP_SIZE_MB=$RAM_MB
+            if [ "$SWAP_SIZE_MB" -gt 4096 ]; then
+                SWAP_SIZE_MB=4096
+            fi
+
+            log_info "Creating ${SWAP_SIZE_MB}MB swap file..."
+            sudo fallocate -l "${SWAP_SIZE_MB}M" /swapfile
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+
+            # Add to fstab if not already there
+            if ! grep -q '/swapfile' /etc/fstab; then
+                echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab > /dev/null
+            fi
+
+            log_success "Swap file created (${SWAP_SIZE_MB}MB)."
+        fi
+    else
+        log_info "Swap setup skipped (not selected)."
+    fi
+    save_checkpoint 17
+fi
+
+# Step 18: Start Odoo Service
+if step 18 "Start Odoo Service"; then
+    log_info "Reloading systemd and starting Odoo service..."
+    sudo systemctl daemon-reload
+    sudo systemctl enable "$OE_SERVICE"
+    sudo systemctl start "$OE_SERVICE"
+    log_success "Odoo service started and enabled."
+    save_checkpoint 18
+fi
+
+# Step 19: Automated Backups (conditional — delegates to odoo_backup.sh)
+if step 19 "Set Up Automated Backups"; then
+    if [ "$SETUP_BACKUP" = "yes" ]; then
+        BACKUP_SCRIPT="$SCRIPT_DIR/odoo_backup.sh"
+
+        if [ ! -f "$BACKUP_SCRIPT" ]; then
+            log_error "odoo_backup.sh not found at $BACKUP_SCRIPT"
+            log_error "Ensure odoo_backup.sh is in the same directory as this script."
+            log_warn "Skipping backup cron setup. You can set it up manually later."
+            SETUP_BACKUP="no"
+        fi
+
+        if [ "$SETUP_BACKUP" = "yes" ]; then
+            # Copy script to user home for cron to use
+            BACKUP_SCRIPT_DST="$OE_HOME/odoo_backup.sh"
+            sudo cp "$BACKUP_SCRIPT" "$BACKUP_SCRIPT_DST"
+            sudo chown "$OE_USER:$OE_USER" "$BACKUP_SCRIPT_DST"
+            sudo chmod 750 "$BACKUP_SCRIPT_DST"
+
+            # Create backup directory
+            sudo mkdir -p "$OE_HOME/backups"
+            sudo chown "$OE_USER:$OE_USER" "$OE_HOME/backups"
+
+            # Build backup flags from user options
+            BACKUP_FLAGS="-u $OE_USER -r $BACKUP_RETENTION -q"
+            if [ "$BACKUP_FILESTORE" = "yes" ]; then
+                BACKUP_FLAGS="$BACKUP_FLAGS -f"
+            fi
+
+            # Parse HH:MM into cron hour and minute
+            CRON_HOUR="${BACKUP_HOUR%%:*}"
+            CRON_MIN="${BACKUP_HOUR##*:}"
+
+            # Install cron job
+            CRON_LINE="$CRON_MIN $CRON_HOUR * * * $BACKUP_SCRIPT_DST $BACKUP_FLAGS >> $OE_DATA_DIR/backup.log 2>&1"
+            ( sudo crontab -l 2>/dev/null | grep -v "$BACKUP_SCRIPT_DST" ; echo "$CRON_LINE" ) | sudo crontab -
+
+            log_success "Backup cron job installed (daily at $BACKUP_HOUR)."
+            log_info "Cron entry: $CRON_LINE"
+            log_info "Backup directory: $OE_HOME/backups"
+        fi
+    else
+        log_info "Automated backups skipped (not selected)."
+    fi
+    save_checkpoint 19
+fi
+
+# ==============================================================================
+# Section 10: Final Summary
+# ==============================================================================
+
+# Build access URL
+if [ "$INSTALL_NGINX" = "yes" ]; then
+    ACCESS_URL="https://$OE_DOMAIN"
+else
+    ACCESS_URL="http://<server-ip>:$OE_PORT"
+fi
+
+echo ""
+echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║            Installation Complete!                       ║${NC}"
+echo -e "${GREEN}╠══════════════════════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║${NC} Odoo User:       ${BLUE}$OE_USER${NC}"
+echo -e "${GREEN}║${NC} Odoo Version:    ${BLUE}$OE_VERSION${NC}"
+echo -e "${GREEN}║${NC} Access URL:      ${BLUE}$ACCESS_URL${NC}"
+echo -e "${GREEN}║${NC} Admin Password:  ${RED}$ADMIN_PASSWD${NC}"
+echo -e "${GREEN}║${NC}"
+echo -e "${GREEN}║${NC} Config File:     $OE_HOME/$OE_CONFIG"
+echo -e "${GREEN}║${NC} Log File:        $OE_DATA_DIR/odoo-server.log"
+echo -e "${GREEN}║${NC} Workers:         $WORKERS"
+echo -e "${GREEN}║${NC}"
+echo -e "${GREEN}║${NC} Service Commands:"
+echo -e "${GREEN}║${NC}   Start:    ${YELLOW}sudo systemctl start $OE_SERVICE${NC}"
+echo -e "${GREEN}║${NC}   Stop:     ${YELLOW}sudo systemctl stop $OE_SERVICE${NC}"
+echo -e "${GREEN}║${NC}   Restart:  ${YELLOW}sudo systemctl restart $OE_SERVICE${NC}"
+echo -e "${GREEN}║${NC}   Status:   ${YELLOW}sudo systemctl status $OE_SERVICE${NC}"
+echo -e "${GREEN}║${NC}   Logs:     ${YELLOW}sudo journalctl -u $OE_SERVICE -f${NC}"
+echo -e "${GREEN}║${NC}"
+if [ "$INSTALL_NGINX" = "yes" ]; then
+echo -e "${GREEN}║${NC} Nginx:           ${GREEN}Enabled${NC} ($OE_DOMAIN)"
+echo -e "${GREEN}║${NC} SSL:             ${GREEN}Let's Encrypt${NC}"
+else
+echo -e "${GREEN}║${NC} Nginx:           ${YELLOW}Not installed${NC}"
+fi
+echo -e "${GREEN}║${NC} Firewall (UFW):  ${GREEN}Enabled${NC}"
+if [ "$SETUP_SWAP" = "yes" ]; then
+echo -e "${GREEN}║${NC} Swap:            ${GREEN}Enabled${NC}"
+fi
+if [ "$SETUP_BACKUP" = "yes" ]; then
+echo -e "${GREEN}║${NC} Backups:         ${GREEN}Daily at $BACKUP_HOUR${NC} (retain ${BACKUP_RETENTION}d, filestore: $BACKUP_FILESTORE)"
+echo -e "${GREEN}║${NC} Backup Dir:      $OE_HOME/backups"
+else
+echo -e "${GREEN}║${NC} Backups:         ${YELLOW}Not configured${NC}"
+fi
+echo -e "${GREEN}║${NC} Logrotate:       ${GREEN}Configured${NC}"
+echo -e "${GREEN}╠══════════════════════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║${NC} ${RED}IMPORTANT: Save the admin password shown above!${NC}"
+echo -e "${GREEN}║${NC} ${RED}It will not be displayed again.${NC}"
+echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
+echo ""
+
+# Remove checkpoint file on successful completion
+rm -f "$CHECKPOINT_FILE"
+
+log_success "All done! Odoo $OE_VERSION is running as '$OE_USER'."

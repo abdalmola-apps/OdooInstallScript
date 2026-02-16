@@ -1,190 +1,306 @@
-# Odoo Installation Script
+# Odoo Production Installation Script
 
-Automated Bash script for setting up complete Odoo instances on Ubuntu/Debian systems. Designed for senior Odoo developers to streamline deployment of multiple Odoo instances with custom configurations.
+Automated Bash script for deploying production-grade Odoo instances on Ubuntu servers. Handles everything from system setup to Nginx reverse proxy with SSL, firewall, swap, log rotation, and auto-tuned performance settings.
 
 ## Features
 
-- **Automated Installation**: Complete Odoo setup with a single script execution
-- **Multi-Instance Support**: Create multiple Odoo instances on the same server with different users and ports
+- **Production-Ready**: Nginx reverse proxy, Let's Encrypt SSL, UFW firewall, logrotate, swap
+- **Automated Backups**: Daily database backups sorted by activity, with filestore support and retention cleanup
+- **Auto-Tuned Performance**: Workers, memory limits, and DB connections computed from CPU cores and RAM
+- **Security Hardened**: Random admin password, no PostgreSQL superuser, config file chmod 640, input validation
+- **Multi-Instance Support**: Run multiple Odoo instances on the same server with different users and ports
+- **Multiple Addon Repos**: Clone several custom addon repositories in a single run
 - **Checkpoint System**: Resume installation from where it left off if interrupted
-- **Custom Addons Support**: Automatically clone and configure custom addon repositories
-- **PostgreSQL Integration**: Automated database user creation with proper permissions
-- **Systemd Service**: Creates and enables systemd service for automatic startup
-- **Virtual Environment**: Isolated Python environment for each Odoo instance
+- **Auto-Detect wkhtmltopdf**: Selects the correct `.deb` for your Ubuntu codename and CPU architecture
+- **Standalone Scripts**: Nginx and backup scripts can be used independently of the installer
+- **Input Validation**: All prompts validated with re-prompt loops (username, port, version, Git URLs, domain, email)
 
 ## Prerequisites
 
-- Ubuntu 18.04+ or Debian 9+ (tested on Ubuntu 22.04 Jammy)
+- Ubuntu 20.04+ (tested on Ubuntu 22.04 Jammy and 24.04 Noble)
 - Root or sudo access
-- Internet connection for downloading packages
-- Git installed (or will be installed by the script)
+- Internet connection
+- A domain name pointing to your server (if using Nginx + SSL)
 
-## wkhtmltopdf Version Compatibility
+## Quick Start
 
-This script installs **wkhtmltopdf 0.12.6.1-2** which is the patched Qt version required for proper PDF generation in Odoo.
+### Download and Run
 
-### Why the Patched Version?
-
-The standard `apt` version of wkhtmltopdf uses an **unpatched Qt library** that doesn't support:
-- `--header-spacing` - Header spacing control
-- `--header-html` - Custom HTML headers
-- `--footer-html` - Custom HTML footers
-
-Without the patched version, you'll see warnings like:
-```
-wkhtmltopdf: The switch --header-spacing, is not support using unpatched qt, and will be ignored.
-```
-
-### Odoo Version Compatibility
-
-| Odoo Version | wkhtmltopdf Version | Status |
-|--------------|---------------------|--------|
-| 18.0 | 0.12.6.1-2 | ✅ Fully Supported |
-| 17.0 | 0.12.6.1-2 | ✅ Fully Supported |
-| 16.0 | 0.12.6.1-2 | ✅ Fully Supported |
-| 15.0 | 0.12.6.1-2 | ✅ Fully Supported |
-| 14.0 | 0.12.5 or 0.12.6.1-2 | ✅ Supported |
-
-### Installation Details
-
-The script automatically:
-1. Downloads the patched version from the official wkhtmltopdf repository
-2. Installs it using `apt install`
-3. Cleans up the downloaded .deb file
-4. Sets `XDG_RUNTIME_DIR` in systemd to prevent Qt warnings
-
-## What Gets Installed
-
-The script installs and configures the following components:
-
-### System Packages
-- PostgreSQL and postgresql-contrib
-- Python 3 development tools (python3-dev, python3-venv, python3-wheel)
-- Build tools (build-essential, git, wget)
-- Required libraries (libxslt-dev, libzip-dev, libldap2-dev, libsasl2-dev, libpq-dev, libpng-dev, libjpeg-dev)
-- Node.js and NPM
-- wkhtmltopdf 0.12.6.1-2 (patched version for Qt - fixes header/footer rendering issues)
-- LESS CSS compiler and plugins
-
-### Python Packages (in virtual environment)
-- All packages from Odoo's requirements.txt
-- Additional packages from this repository's requirements.txt (see [Additional Requirements](#additional-requirements) section)
-
-### Odoo Components
-- Odoo source code (specified version)
-- Custom addons repository (from provided Git URL)
-- Configuration file
-- Systemd service file
-
-## Usage
-
-### Run Directly from GitHub (Recommended)
-
-You can run the script directly from GitHub without cloning the repository:
-
-> **Note:** It's recommended to review the script content before running it directly.
-
-#### Method 1: Using curl (one-liner)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/abdalmola-apps/OdooInstallScript/main/odoo_install.sh | sudo bash
-```
-
-#### Method 2: Using wget (one-liner)
-```bash
-wget -qO- https://raw.githubusercontent.com/abdalmola-apps/OdooInstallScript/main/odoo_install.sh | sudo bash
-```
-
-#### Method 3: Download first, then execute
-```bash
-# Download the script
 wget https://raw.githubusercontent.com/abdalmola-apps/OdooInstallScript/main/odoo_install.sh
-
-# Make it executable
 chmod +x odoo_install.sh
-
-# Run it
 sudo ./odoo_install.sh
 ```
 
-Or using curl:
-```bash
-# Download the script
-curl -O https://raw.githubusercontent.com/abdalmola-apps/OdooInstallScript/main/odoo_install.sh
+### From Cloned Repository
 
-# Make it executable
-chmod +x odoo_install.sh
-
-# Run it
-sudo ./odoo_install.sh
-```
-
-### Basic Usage (From Cloned Repository)
-
-1. Clone the repository:
 ```bash
 git clone https://github.com/abdalmola-apps/OdooInstallScript.git
 cd OdooInstallScript
-```
-
-2. Make the script executable:
-```bash
 chmod +x odoo_install.sh
-```
-
-3. Run the script with sudo:
-```bash
 sudo ./odoo_install.sh
 ```
 
-4. Provide the requested information:
-   - **Username**: Name for the Odoo system user (e.g., `odoo18`, `client1`)
-   - **Odoo Version**: Branch/version to install (e.g., `18.0`, `17.0`, `16.0`)
-   - **Port**: Port number for this instance (e.g., `8069`, `8070`)
-   - **Custom Addons Git URL**: Repository URL for custom addons
+## Interactive Prompts
 
-### Example Installation
+The script prompts for the following (with validation and defaults):
 
-```bash
-sudo ./odoo_install.sh
+| Prompt | Default | Validation |
+|--------|---------|------------|
+| System username | *(required)* | Alphanumeric + underscore |
+| Odoo version | `18.0` | Format: `XX.0` |
+| HTTP port | `8069` | Range: 1024-65535 |
+| Install Nginx? | `no` | yes/no |
+| Domain name | *(required if Nginx)* | Valid FQDN |
+| Certbot email | *(required if Nginx)* | Valid email |
+| Custom addon Git URLs | *(optional)* | Comma-separated, validated |
+| Set up swap? | Auto (`yes` if RAM < 4GB) | yes/no |
+| Set up daily backups? | `yes` | yes/no |
+| Include filestore? | `yes` *(if backups)* | yes/no |
+| Retention days | `30` *(if backups)* | Positive integer |
+| Backup time | `02:00` *(if backups)* | HH:MM (24h) |
 
-Enter the new username for the Odoo instance: odoo18
-Enter the Odoo version (e.g., 18.0, 17.0): 18.0
-Enter the port for this Odoo instance (e.g., 8069): 8069
-Enter the Git URL for your custom addons: https://github.com/mycompany/custom-addons
+A confirmation summary is displayed before any changes are made.
+
+### Example Session
+
+```
+Enter the Odoo system username: odoo18
+Enter the Odoo version [18.0]: 18.0
+Enter the Odoo HTTP port [8069]: 8069
+Install Nginx as reverse proxy? (yes/no) [no]: yes
+Enter the domain name (e.g., odoo.example.com): erp.mycompany.com
+Enter email for Let's Encrypt SSL certificate: admin@mycompany.com
+Enter custom addon Git URLs (comma-separated, or leave empty): https://github.com/mycompany/custom-addons
+Set up swap file? (yes/no) [yes]: yes
+Set up automated daily backups? (yes/no) [yes]: yes
+Include filestore in backups? (yes/no) [yes]: yes
+Backup retention in days [30]: 30
+Backup time (HH:MM, 24h format) [02:00]: 02:00
+
+╔══════════════════════════════════════════════════════════╗
+║                  Installation Summary                   ║
+╠══════════════════════════════════════════════════════════╣
+║ Username:        odoo18
+║ Odoo Version:    18.0
+║ HTTP Port:       8069
+║ Longpolling:     8070
+║ Workers:         5 (CPU: 2, RAM: 4096MB)
+║ Nginx + SSL:     yes
+║ Domain:          erp.mycompany.com
+║ Addon Repos:     1
+║ Swap:            yes
+║ Daily Backups:   yes
+║   Filestore:     yes
+║   Retention:     30 days
+║   Schedule:      Daily at 02:00
+╚══════════════════════════════════════════════════════════╝
+
+Proceed with installation? (yes/no): yes
 ```
 
 ## Installation Steps
 
-The script performs 14 automated steps:
+The script performs 19 automated steps:
 
-1. **Check & Install PostgreSQL**: Verifies PostgreSQL installation or installs if missing
-2. **Set Timezone**: Configures system timezone to Asia/Riyadh
-3. **Create Users**: Creates system user and PostgreSQL user with superuser rights
-4. **Clone Odoo**: Downloads Odoo source code from GitHub
-5. **Install System Dependencies**: Installs all required system packages
-6. **Setup Python Environment**: Creates virtual environment and installs Python packages
-7. **Install LESS CSS**: Installs LESS compiler for frontend styling
-8. **Create Directories**: Sets up data and custom addons directories
-9. **Generate SSH Key**: Creates SSH key for the Odoo user
-10. **Clone Custom Addons**: Downloads custom addons from provided repository
-11. **Create Configuration**: Generates Odoo configuration file
-12. **Create Service**: Sets up systemd service file
-13. **Set Permissions**: Configures proper ownership and permissions
-14. **Start Service**: Enables and starts the Odoo service
+| Step | Description |
+|------|-------------|
+| 1 | Check & install PostgreSQL |
+| 2 | Set timezone to Asia/Riyadh |
+| 3 | Create system user & PostgreSQL user (no superuser) |
+| 4 | Clone Odoo source code |
+| 5 | Install system dependencies & auto-detect wkhtmltopdf |
+| 6 | Create Python venv & install dependencies |
+| 7 | Install Node.js, LESS & rtlcss |
+| 8 | Create data & custom-addons directories |
+| 9 | Generate Ed25519 SSH key |
+| 10 | Clone custom addon repositories |
+| 11 | Generate Odoo config (auto-tuned workers & memory) |
+| 12 | Create systemd service file |
+| 13 | Set ownership & permissions |
+| 14 | Configure logrotate |
+| 15 | Configure Nginx & Let's Encrypt SSL *(conditional, uses `odoo_nginx.sh`)* |
+| 16 | Configure UFW firewall |
+| 17 | Set up swap file *(conditional)* |
+| 18 | Enable & start Odoo service |
+| 19 | Set up automated daily backups *(conditional, uses `odoo_backup.sh`)* |
+
+## What Gets Installed
+
+### System Packages
+- PostgreSQL and postgresql-contrib
+- Python 3 development tools (python3-dev, python3-venv, python3-wheel, python3-setuptools)
+- Build tools (build-essential, git, wget, curl)
+- Required libraries (libxslt-dev, libzip-dev, libldap2-dev, libsasl2-dev, libpq-dev, libpng-dev, libjpeg-dev)
+- Node.js, npm, LESS, rtlcss
+- wkhtmltopdf 0.12.6.1-2 (patched Qt version, auto-detected for your OS)
+- UFW firewall
+- Nginx + Certbot *(optional)*
+
+### Python Packages (in virtual environment)
+- All packages from Odoo's `requirements.txt`
+- num2words, ofxparse, dbfread, ebaysdk, firebase_admin, pyOpenSSL
+- Additional packages from this repository's `requirements.txt` (if present)
+
+## Security
+
+The script applies production security practices by default:
+
+| Area | What's Done |
+|------|-------------|
+| Admin password | Random 24-character password generated via `openssl rand` |
+| PostgreSQL user | Created with `--no-superuser --no-createrole` (only `--createdb`) |
+| Config file | `chmod 640` — readable only by Odoo user and root |
+| Service file | `chmod 644` — standard systemd permissions |
+| Database listing | `list_db = False` — hides database manager |
+| Firewall | UFW enabled: SSH, 80, 443 allowed; direct Odoo port only if no Nginx |
+| Proxy mode | `proxy_mode = True` when Nginx is enabled |
+| Input validation | All user inputs validated before use to prevent injection |
+
+## Auto-Tuned Configuration
+
+The Odoo config file is computed based on your server's hardware:
+
+```
+workers         = min(CPU_CORES * 2 + 1, RAM_MB / 256)    # at least 2
+max_cron_threads = 1
+limit_memory_soft = (RAM * 0.8) / (workers + cron + 1)
+limit_memory_hard = soft * 1.2
+limit_time_cpu   = 600
+limit_time_real  = 1200
+db_maxconn       = workers * 2 + 4
+```
+
+Example for a 2-core / 4GB server: 5 workers, ~550MB soft limit per worker, 14 max DB connections.
+
+## Nginx Reverse Proxy
+
+When Nginx is enabled, the script creates a full production config with:
+
+- Upstream blocks for Odoo HTTP and longpolling
+- WebSocket support (`/websocket` location with upgrade headers)
+- Longpolling proxy (`/longpolling`)
+- Static file caching (`/web/static/` with 24h expiry)
+- Gzip compression on text types
+- Proper proxy headers (`X-Forwarded-Host`, `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Real-IP`)
+- `client_max_body_size 200m`
+- Let's Encrypt SSL via Certbot (automated, with graceful fallback)
+
+## Automated Backups
+
+When backups are enabled during installation, the script installs `odoo_backup.sh` and a cron job that runs daily at 2:00 AM.
+
+### What It Does
+
+1. Discovers all PostgreSQL databases owned by the Odoo user
+2. Queries each database for the latest `write_date` from `res_users`
+3. Sorts databases by activity (most recently used first)
+4. Creates compressed `pg_dump` backups (custom format, compression level 5)
+5. Optionally archives the filestore directory for each database
+6. Cleans up backups older than the retention period (default: 30 days)
+
+### Backup Files
+
+- **Database dumps**: `<dbname>_<timestamp>.dump` (restorable via `pg_restore`)
+- **Filestore archives**: `<dbname>_filestore_<timestamp>.tar.gz`
+- **Log**: `/home/<username>/data/backup.log`
+
+### Running Manually
+
+```bash
+# Full backup with filestore
+sudo ./odoo_backup.sh -u <username> -f
+
+# Custom retention (14 days) and backup directory
+sudo ./odoo_backup.sh -u <username> -f -r 14 -d /mnt/backups
+
+# Quiet mode (for scripting)
+sudo ./odoo_backup.sh -u <username> -f -q
+```
+
+### CLI Flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-u <username>` | Odoo system user (required) | — |
+| `-d <dir>` | Backup directory | `/home/<user>/backups` |
+| `-r <days>` | Delete backups older than N days | `30` |
+| `-f` | Include filestore in backup | off |
+| `-q` | Quiet mode (errors only) | off |
+| `-h` | Show help | — |
+
+### Restoring a Backup
+
+```bash
+# Restore database
+sudo -u <username> pg_restore -d <new_dbname> --create /home/<username>/backups/<dbname>_<timestamp>.dump
+
+# Restore filestore
+sudo -u <username> tar -xzf /home/<username>/backups/<dbname>_filestore_<timestamp>.tar.gz -C /home/<username>/data/filestore/
+```
+
+## Standalone Nginx Setup
+
+The Nginx configuration is available as a standalone script (`odoo_nginx.sh`) that can be run independently of the installer. This is useful for:
+
+- Adding Nginx to an existing Odoo installation
+- Reconfiguring Nginx with a different domain
+- Setting up Nginx on a separate proxy server
+
+### Usage
+
+```bash
+# Basic setup
+sudo ./odoo_nginx.sh -u odoo18 -d erp.mycompany.com -e admin@mycompany.com
+
+# Custom ports
+sudo ./odoo_nginx.sh -u odoo18 -d erp.mycompany.com -e admin@mycompany.com -p 8015 -l 8016
+```
+
+### CLI Flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-u <username>` | Odoo system user (required) | — |
+| `-d <domain>` | FQDN (required) | — |
+| `-e <email>` | Let's Encrypt email (required) | — |
+| `-p <port>` | Odoo HTTP port | `8069` |
+| `-l <port>` | Longpolling port | port + 1 |
+| `-h` | Show help | — |
+
+### What It Does
+
+1. Installs Nginx, Certbot, and python3-certbot-nginx
+2. Writes the Nginx site config (upstream blocks, WebSocket support, static caching, gzip)
+3. Enables the site, removes the default site, tests and reloads Nginx
+4. Requests a Let's Encrypt SSL certificate via Certbot
+5. Sets `proxy_mode = True` in the Odoo config (if found)
+
+## wkhtmltopdf Auto-Detection
+
+The script automatically selects the correct wkhtmltopdf package based on:
+
+- **Ubuntu codename**: focal (20.04), jammy (22.04), noble (24.04)
+- **Architecture**: amd64, arm64
+
+Falls back to `jammy` if the codename is not recognized.
+
+### Why the Patched Version?
+
+The standard `apt` version uses an unpatched Qt library that doesn't support `--header-spacing`, `--header-html`, and `--footer-html` — required for proper PDF rendering in Odoo.
 
 ## Checkpoint System
 
-The script includes a checkpoint system that saves progress after each step. If the installation is interrupted:
+The script saves progress after each step to `/tmp/odoo_setup_checkpoint_<username>`. If interrupted:
 
-- The script can be re-run with the same username
-- Previously completed steps will be skipped automatically
+- Re-run the script with the same username
+- Completed steps are automatically skipped
 - Installation resumes from the last incomplete step
+- On failure, the error handler shows which step failed and how to resume
 
-Checkpoint files are stored in `/tmp/odoo_setup_checkpoint_<username>`
+The checkpoint file is removed on successful completion.
 
 ## Directory Structure
-
-After installation, the following structure is created:
 
 ```
 /home/<username>/
@@ -194,71 +310,90 @@ After installation, the following structure is created:
 │   ├── venv/               # Python virtual environment
 │   └── requirements.txt    # Python dependencies
 ├── data/                    # Odoo data directory
-│   └── odoo-server.log     # Log file
-├── custom-addons/           # Custom addons repository
-│   └── <addon-repo>/       # Cloned custom addons
+│   ├── odoo-server.log     # Log file (logrotate configured)
+│   └── backup.log          # Backup script log (if backups enabled)
+├── backups/                 # Database backups (if backups enabled)
+│   ├── mydb_20260216_020000.dump
+│   └── mydb_filestore_20260216_020000.tar.gz
+├── custom-addons/           # Custom addon repositories
+│   ├── <repo-1>/           # First cloned addon repo
+│   └── <repo-2>/           # Second cloned addon repo
 ├── .ssh/                    # SSH keys for git operations
-│   └── id_rsa              # Generated SSH key
-└── <username>-odoo.conf    # Odoo configuration file
+│   └── id_ed25519          # Ed25519 SSH key
+├── odoo_backup.sh           # Backup script (if backups enabled)
+├── odoo_nginx.sh            # Nginx setup script (if Nginx enabled)
+└── <username>-odoo.conf    # Odoo configuration (chmod 640)
 ```
-
-## Configuration File
-
-The script generates a configuration file at `/home/<username>/<username>-odoo.conf` with:
-
-- Admin password: `admin_password` (change this after installation!)
-- Database user: matches the system username
-- HTTP port: as specified during installation
-- XML-RPC port: same as HTTP port
-- Addons path: includes both standard and custom addons
-- Log file location
-- Data directory location
-
-## Service Configuration
-
-The systemd service includes the following optimizations:
-- **XDG_RUNTIME_DIR**: Set to `/tmp/runtime-<username>` to prevent Qt warnings
-- **Auto-start**: Enabled by default on system boot
-- **PostgreSQL dependency**: Ensures database is ready before Odoo starts
 
 ## Service Management
 
-After installation, manage the Odoo service with systemctl:
-
 ```bash
-# Check service status
+# Check status
 sudo systemctl status <username>-odoo.service
 
-# Stop service
-sudo systemctl stop <username>-odoo.service
-
-# Start service
+# Start / Stop / Restart
 sudo systemctl start <username>-odoo.service
-
-# Restart service
+sudo systemctl stop <username>-odoo.service
 sudo systemctl restart <username>-odoo.service
 
-# View logs
+# View live logs
 sudo journalctl -u <username>-odoo.service -f
 ```
 
-## Accessing Odoo
+The systemd service includes:
+- `Restart=on-failure` with `RestartSec=5`
+- `LimitNOFILE=65536`
+- `NODE_OPTIONS` for optimized Node.js memory usage
+- PostgreSQL dependency (waits for database before starting)
 
-After successful installation:
+## Logrotate
 
-1. Open your web browser
-2. Navigate to: `http://localhost:<port>` or `http://your-server-ip:<port>`
-3. Create your first database using the Odoo database manager
+Logs are rotated automatically:
+- **Frequency**: Weekly
+- **Retention**: 12 rotations (3 months)
+- **Compression**: Enabled (with delay)
+- **Method**: `copytruncate` (no service restart needed)
 
-## Security Considerations
+Config file: `/etc/logrotate.d/<username>-odoo`
 
-After installation, you should:
+## Swap File
 
-1. **Change admin password**: Edit the configuration file and update `admin_passwd`
-2. **Configure firewall**: Restrict access to Odoo ports
-3. **Setup NGINX/Apache**: Use a reverse proxy for production
-4. **Enable SSL**: Configure HTTPS for secure connections
-5. **Update SSH keys**: Add the generated SSH key to your Git provider for custom addons access
+When enabled, the script creates a swap file:
+- **Size**: Equal to RAM, capped at 4GB
+- **Permissions**: `chmod 600`
+- **Persistence**: Added to `/etc/fstab`
+- **Auto-suggest**: Recommended when RAM < 4GB
+
+## Multiple Instances
+
+Run the script again with a different username and port. Each instance gets its own:
+- System user and PostgreSQL user
+- Odoo installation and venv
+- Configuration and service files
+- Log rotation config
+- Nginx site config (if enabled)
+
+## Additional Requirements
+
+This repository includes a `requirements.txt` with commonly used Python packages:
+
+| Category | Packages |
+|----------|----------|
+| CLI Tools | click-odoo, click-odoo-contrib |
+| PDF/Reporting | PyPDF2, reportlab |
+| Excel | xlrd, xlwt, openpyxl, xlsxwriter |
+| Data Processing | pandas, numpy |
+| API Integration | requests, zeep |
+| Enhanced Features | num2words, ofxparse, dbfread, ebaysdk, firebase-admin, pyOpenSSL |
+
+The script automatically detects and installs this file if present in the same directory.
+
+### Manual Installation (Existing Setups)
+
+```bash
+sudo -u <username> /home/<username>/odoo/venv/bin/pip install -r requirements.txt
+sudo systemctl restart <username>-odoo.service
+```
 
 ## Troubleshooting
 
@@ -268,226 +403,77 @@ After installation, you should:
 sudo journalctl -u <username>-odoo.service -n 50
 
 # Check Odoo log file
-sudo tail -f /home/<username>/data/odoo-server.log
+tail -f /home/<username>/data/odoo-server.log
 
 # Verify Python dependencies
-sudo su - <username>
-source odoo/venv/bin/activate
-pip list
+sudo -u <username> /home/<username>/odoo/venv/bin/pip list
 ```
 
 ### Port already in use
-- Choose a different port during installation
-- Check running services: `sudo netstat -tulpn | grep :<port>`
+```bash
+sudo ss -tlnp | grep :<port>
+```
+Choose a different port and re-run the script.
 
 ### PostgreSQL connection issues
 ```bash
-# Verify PostgreSQL user
+# Verify PostgreSQL user exists
 sudo -u postgres psql -c "\du"
 
 # Test connection
 sudo -u <username> psql -l
 ```
 
+### Nginx issues
+```bash
+# Test config syntax
+sudo nginx -t
+
+# Check Nginx error log
+tail -f /var/log/nginx/<username>-odoo-error.log
+
+# Retry SSL certificate
+sudo certbot --nginx -d <domain> -m <email>
+```
+
 ### Permission errors
 ```bash
-# Reset permissions
 sudo chown -R <username>:<username> /home/<username>/
-```
-
-## Additional Requirements
-
-This repository includes a `requirements.txt` file with commonly used Python packages for Odoo development and production environments.
-
-### Included Packages
-
-The requirements.txt includes:
-
-#### **Odoo CLI Tools**
-- `click-odoo` - CLI framework for Odoo scripting
-- `click-odoo-contrib` - Collection of useful Odoo CLI utilities
-
-#### **Enhanced Features**
-- `num2words` - Convert numbers to words (for invoices, checks)
-- `ofxparse` - Parse OFX/QFX banking files
-- `dbfread` - Read DBF files (legacy data import)
-- `ebaysdk` - eBay marketplace integration
-- `firebase-admin` - Firebase/FCM push notifications
-- `pyOpenSSL` - Enhanced SSL/TLS support
-
-#### **PDF and Reporting**
-- `PyPDF2` - PDF manipulation and merging
-- `reportlab` - Advanced PDF generation
-
-#### **Excel/Spreadsheet Support**
-- `xlrd`, `xlwt` - Excel 97-2003 format (.xls)
-- `openpyxl` - Excel 2010+ format (.xlsx)
-- `xlsxwriter` - Enhanced Excel writing with formatting
-
-#### **Data Processing**
-- `pandas` - Data analysis and manipulation
-- `numpy` - Numerical computing
-
-#### **API Integration**
-- `requests` - HTTP library for REST APIs
-- `zeep` - SOAP/WSDL client
-
-#### **Development Tools** (commented out by default)
-- `pytest`, `pytest-odoo` - Testing frameworks
-- `pylint-odoo` - Odoo-specific code linting
-- `black`, `isort` - Code formatting tools
-
-### Automatic Installation
-
-**The script automatically detects and installs the requirements.txt file if it exists in the same directory as the installation script.**
-
-When you run the installation script from the cloned repository, it will:
-1. Install Odoo's built-in requirements.txt
-2. Install common packages (num2words, ofxparse, etc.)
-3. **Automatically detect and install this repository's requirements.txt** if present
-
-No extra steps needed! Just run the script as usual.
-
-### Manual Installation (for existing setups)
-
-If you want to install the requirements.txt on an already installed Odoo instance:
-
-```bash
-# Switch to the Odoo user
-sudo su - <username>
-
-# Activate virtual environment
-source odoo/venv/bin/activate
-
-# Download requirements.txt
-wget https://raw.githubusercontent.com/abdalmola-apps/OdooInstallScript/main/requirements.txt
-
-# Install packages
-pip install -r requirements.txt
-
-# Restart Odoo service
-exit
-sudo systemctl restart <username>-odoo.service
-```
-
-### Installing Specific Packages
-
-```bash
-sudo su - <username>
-source odoo/venv/bin/activate
-
-# Install specific packages
-pip install click-odoo-contrib pandas xlsxwriter
-
-# Or upgrade existing packages
-pip install --upgrade num2words PyPDF2
-```
-
-### Using click-odoo-contrib
-
-After installing `click-odoo-contrib`, you can use powerful CLI commands:
-
-```bash
-# Activate environment
-sudo su - <username>
-source odoo/venv/bin/activate
-
-# Export database
-click-odoo-dropdb DBNAME
-
-# Initialize database with demo data
-click-odoo-initdb -n DBNAME -m base,sale,purchase --demo
-
-# Update modules
-click-odoo-update -d DBNAME -m sale,purchase
-
-# Run Python shell with Odoo environment
-click-odoo-shell -d DBNAME
-```
-
-## Multiple Instances
-
-To install multiple Odoo instances:
-
-1. Run the script again with a different username
-2. Specify a different port number
-3. Each instance will have its own:
-   - System user
-   - PostgreSQL user
-   - Odoo installation
-   - Configuration file
-   - Systemd service
-
-## Customizing Python Dependencies
-
-### Adding Packages to Your Installation
-
-If you need additional Python packages beyond what's in requirements.txt:
-
-```bash
-# Switch to Odoo user
-sudo su - <username>
-
-# Activate virtual environment
-source odoo/venv/bin/activate
-
-# Install package
-pip install <package-name>
-
-# Or install with specific version
-pip install <package-name>==<version>
-
-# Restart Odoo to use new packages
-exit
-sudo systemctl restart <username>-odoo.service
-```
-
-### Creating Your Own Requirements File
-
-For production deployments, you may want to create a custom requirements file:
-
-```bash
-# Activate environment
-sudo su - <username>
-source odoo/venv/bin/activate
-
-# Export currently installed packages
-pip freeze > custom-requirements.txt
-
-# Later, install from your custom file
-pip install -r custom-requirements.txt
 ```
 
 ## Uninstalling
 
-To remove an Odoo instance:
-
 ```bash
-# Stop and disable service
+# Stop and remove service
 sudo systemctl stop <username>-odoo.service
 sudo systemctl disable <username>-odoo.service
 sudo rm /etc/systemd/system/<username>-odoo.service
+sudo systemctl daemon-reload
 
-# Remove PostgreSQL user
+# Remove backup cron job (if installed)
+sudo crontab -l | grep -v "odoo_backup.sh" | sudo crontab -
+
+# Remove Nginx site (if installed)
+sudo rm -f /etc/nginx/sites-enabled/<domain>
+sudo rm -f /etc/nginx/sites-available/<domain>
+sudo systemctl reload nginx
+
+# Remove logrotate config
+sudo rm -f /etc/logrotate.d/<username>-odoo
+
+# Remove PostgreSQL user and databases
 sudo -u postgres dropuser <username>
 
-# Remove system user and home directory
+# Remove system user and home directory (includes backups)
 sudo userdel -r <username>
-
-# Reload systemd
-sudo systemctl daemon-reload
 ```
-
-## Contributing
-
-Feel free to submit issues, fork the repository, and create pull requests for improvements.
 
 ## License
 
-This script is provided as-is for use by Odoo developers and system administrators.
+`odoo_install.sh` is provided under LGPL-3.
 
 ## Author
 
 **abdalmola**
 
-Created for senior Odoo developers to streamline instance deployment and management.
+Production-grade Odoo deployment automation for system administrators and DevOps engineers.
