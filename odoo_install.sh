@@ -479,27 +479,52 @@ if step 5 "Install System Dependencies & wkhtmltopdf"; then
         libxslt-dev libzip-dev libldap2-dev libsasl2-dev \
         libpng-dev libjpeg-dev libpq-dev
 
-    # Auto-detect wkhtmltopdf for current Ubuntu codename + architecture
+    # wkhtmltopdf release + build to use, per Ubuntu codename. Upstream archived
+    # the project in 2023, so the asset list is now fixed and these are the only
+    # combinations that exist (checked against the GitHub release assets):
+    #   focal  - only 0.12.6-1 ships focal amd64/arm64; later releases are ppc64el only
+    #   jammy  - 0.12.6.1-3, the last release
+    #   noble  - no noble build exists or ever will. The jammy deb installs anyway:
+    #            it needs libssl3 and libpng16-16, which noble's libssl3t64 and
+    #            libpng16-16t64 Provide, and libjpeg-turbo8 is still itself there.
+    # The old code built <version>.<codename>_<arch>.deb for all three, so focal
+    # and noble always 404'd — wget exited 8 and killed the run at step 5.
     CODENAME="$(get_ubuntu_codename)"
     ARCH="$(dpkg --print-architecture)"
-    WKHTMLTOPDF_VERSION="0.12.6.1-2"
 
     case "$CODENAME" in
-        focal|jammy|noble)
-            WKHTMLTOPDF_URL="https://github.com/wkhtmltopdf/packaging/releases/download/${WKHTMLTOPDF_VERSION}/wkhtmltox_${WKHTMLTOPDF_VERSION}.${CODENAME}_${ARCH}.deb"
-            ;;
+        focal) WKHTMLTOPDF_VERSION="0.12.6-1";   WKHTMLTOPDF_DIST="focal" ;;
+        jammy) WKHTMLTOPDF_VERSION="0.12.6.1-3"; WKHTMLTOPDF_DIST="jammy" ;;
+        noble) WKHTMLTOPDF_VERSION="0.12.6.1-3"; WKHTMLTOPDF_DIST="jammy" ;;
         *)
-            log_warn "Unsupported Ubuntu codename '$CODENAME'. Falling back to jammy."
-            WKHTMLTOPDF_URL="https://github.com/wkhtmltopdf/packaging/releases/download/${WKHTMLTOPDF_VERSION}/wkhtmltox_${WKHTMLTOPDF_VERSION}.jammy_${ARCH}.deb"
+            WKHTMLTOPDF_VERSION="0.12.6.1-3"; WKHTMLTOPDF_DIST="jammy"
+            log_warn "Unknown Ubuntu codename '$CODENAME'. Trying the jammy build."
             ;;
     esac
 
+    WKHTMLTOPDF_URL="https://github.com/wkhtmltopdf/packaging/releases/download/${WKHTMLTOPDF_VERSION}/wkhtmltox_${WKHTMLTOPDF_VERSION}.${WKHTMLTOPDF_DIST}_${ARCH}.deb"
+
     if command -v wkhtmltopdf &> /dev/null; then
         log_success "wkhtmltopdf is already installed."
+        # The apt build uses an unpatched Qt that ignores --header-html/--footer-html,
+        # so Odoo reports render without headers and footers.
+        if ! wkhtmltopdf --version 2>/dev/null | grep -q 'patched qt'; then
+            log_warn "This wkhtmltopdf is NOT the patched-Qt build — Odoo report"
+            log_warn "headers and footers will not render. Remove it and re-run:"
+            log_warn "  sudo apt-get remove -y wkhtmltopdf"
+        fi
     else
-        log_info "Downloading wkhtmltopdf for ${CODENAME}/${ARCH}..."
+        log_info "Downloading wkhtmltopdf ${WKHTMLTOPDF_VERSION} (${WKHTMLTOPDF_DIST} build) for ${CODENAME}/${ARCH}..."
         WKHTMLTOPDF_DEB="/tmp/wkhtmltox_${WKHTMLTOPDF_VERSION}.deb"
-        wget -q "$WKHTMLTOPDF_URL" -O "$WKHTMLTOPDF_DEB"
+        # Report the URL on failure — a bare `wget -q` exit 8 says nothing about
+        # which asset was missing.
+        if ! wget -q "$WKHTMLTOPDF_URL" -O "$WKHTMLTOPDF_DEB"; then
+            rm -f "$WKHTMLTOPDF_DEB"
+            log_error "Download failed: $WKHTMLTOPDF_URL"
+            log_error "No wkhtmltopdf build exists for ${CODENAME}/${ARCH}."
+            log_error "Available assets: https://github.com/wkhtmltopdf/packaging/releases"
+            exit 1
+        fi
         apt_get install -y "$WKHTMLTOPDF_DEB"
         rm -f "$WKHTMLTOPDF_DEB"
         log_success "wkhtmltopdf installed."

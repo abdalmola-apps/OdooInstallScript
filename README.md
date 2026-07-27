@@ -133,7 +133,7 @@ The script performs 19 automated steps:
 - Build tools (build-essential, git, wget, curl)
 - Required libraries (libxslt-dev, libzip-dev, libldap2-dev, libsasl2-dev, libpq-dev, libpng-dev, libjpeg-dev)
 - Node.js, npm, LESS, rtlcss
-- wkhtmltopdf 0.12.6.1-2 (patched Qt version, auto-detected for your OS)
+- wkhtmltopdf (patched Qt version, release auto-selected for your OS — see below)
 - UFW firewall
 - Nginx + Certbot *(optional)*
 
@@ -280,12 +280,20 @@ sudo ./odoo_nginx.sh -u odoo18 -d erp.mycompany.com -e admin@mycompany.com -p 80
 
 ## wkhtmltopdf Auto-Detection
 
-The script automatically selects the correct wkhtmltopdf package based on:
+Upstream archived wkhtmltopdf in 2023, so the published builds are now fixed — and there is no build for every Ubuntu release. The script picks the combination that actually exists:
 
-- **Ubuntu codename**: focal (20.04), jammy (22.04), noble (24.04)
-- **Architecture**: amd64, arm64
+| Ubuntu | Codename | Release used | Build |
+|--------|----------|--------------|-------|
+| 20.04 | focal | `0.12.6-1` | `focal` — later releases dropped focal amd64/arm64 |
+| 22.04 | jammy | `0.12.6.1-3` | `jammy` |
+| 24.04 | noble | `0.12.6.1-3` | `jammy` — no noble build exists |
+| other | — | `0.12.6.1-3` | `jammy` (with a warning) |
 
-Falls back to `jammy` if the codename is not recognized.
+Architectures: `amd64`, `arm64`.
+
+The jammy package installs cleanly on 24.04 despite the `t64` library rename: noble's `libssl3t64` and `libpng16-16t64` declare `Provides:` for the names it depends on, and `libjpeg-turbo8` is unchanged.
+
+If the download 404s, the script reports the exact URL and stops rather than failing with a bare `wget` exit code. An already-installed wkhtmltopdf is checked for the patched-Qt build and warns if it is the unpatched apt version.
 
 ### Why the Patched Version?
 
