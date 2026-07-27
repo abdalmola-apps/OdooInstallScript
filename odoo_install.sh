@@ -845,6 +845,31 @@ else
     ADDONS_PATH="$ADDONS_PATH,$OE_CUSTOM_ADDONS_DIR"
 fi
 
+# Odoo does not recurse into addons_path entries. A repo that groups its modules
+# into subdirectories (accounting/, hr/, l10n/) needs one entry per subdirectory
+# — without it those modules are invisible, and any that were already installed
+# load as "not installable, skipped": their models vanish while their views and
+# crons stay in the database, which breaks the web client at runtime.
+# Called after cloning (step 10), so the directories actually exist.
+expand_addon_collections() {
+    local out="" entry sub
+    local IFS=,
+    for entry in $1; do
+        out="${out:+$out,}$entry"
+        [ -d "$entry" ] || continue
+        for sub in "$entry"/*/; do
+            sub="${sub%/}"
+            # already a module — covered by its parent entry
+            [ -f "$sub/__manifest__.py" ] && continue
+            # a directory of modules — needs its own entry
+            if compgen -G "$sub/*/__manifest__.py" > /dev/null 2>&1; then
+                out="$out,$sub"
+            fi
+        done
+    done
+    printf '%s' "$out"
+}
+
 LAST_CHECKPOINT=$(get_last_checkpoint)
 CURRENT_STEP=0
 
@@ -1191,7 +1216,9 @@ fi
 
 # Step 11: Odoo Configuration File
 if step 11 "Create Odoo Configuration File"; then
+    ADDONS_PATH="$(expand_addon_collections "$ADDONS_PATH")"
     log_info "Writing config to $OE_HOME/$OE_CONFIG..."
+    log_info "Addons path: $ADDONS_PATH"
     sudo tee "$OE_HOME/$OE_CONFIG" > /dev/null <<ODOO_CONF
 [options]
 admin_passwd = $ADMIN_PASSWD
@@ -1244,7 +1271,9 @@ User=$OE_USER
 Group=$OE_USER
 
 Environment=XDG_RUNTIME_DIR=/tmp/runtime-$OE_USER
-Environment="NODE_OPTIONS=--max-old-space-size=256 --optimize-for-size --no-opt"
+# Only the V8 flags on Node's allow-list work here; --optimize-for-size and
+# --no-opt make node refuse to start at all, which breaks rtlcss (RTL assets).
+Environment="NODE_OPTIONS=--max-old-space-size=256"
 
 ExecStart=$OE_HOME_EXT/venv/bin/python3 $OE_HOME_EXT/odoo-bin -c $OE_HOME/$OE_CONFIG
 WorkingDirectory=$OE_HOME_EXT
