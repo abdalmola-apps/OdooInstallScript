@@ -544,7 +544,12 @@ sudo userdel -r <username>
 
 ## License
 
-`odoo_install.sh` is provided under LGPL-3.
+All three scripts are released under the **GNU Lesser General Public License v3.0**, matching Odoo's own licence.
+
+- [`COPYING.LESSER`](COPYING.LESSER) — the LGPL-3.0 terms
+- [`COPYING`](COPYING) — the GPL-3.0 text that the LGPL builds on
+
+Both files are needed: the LGPL is a set of additional permissions layered on the GPL, so it incorporates the GPL by reference rather than restating it. The two-file `COPYING` / `COPYING.LESSER` split is the FSF's own convention.
 
 ## Author
 
