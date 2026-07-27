@@ -36,38 +36,48 @@ sudo ./odoo_install.sh
 
 Then answer the prompts. Nothing is changed on the system until you confirm the summary.
 
-### Install as a system command
+### Install as the `abo` command
 
-If you deploy more than one server, put the three scripts on `PATH` once:
+If you deploy more than one server, install the toolkit once:
 
 ```bash
 sudo make install
 ```
 
-| Becomes | From |
-|---------|------|
-| `odoo-install` | `odoo_install.sh` |
-| `odoo-nginx` | `odoo_nginx.sh` |
-| `odoo-backup` | `odoo_backup.sh` |
+That puts a single `abo` command on `PATH`, with five subcommands:
 
-They go in `/usr/local/bin`, with `requirements.txt` in `/usr/local/share/odoo-install/`. From then on, from any directory:
+| Command | Does | Script |
+|---------|------|--------|
+| `abo install` | Provision a new Odoo instance | `odoo_install.sh` |
+| `abo nginx` | Add reverse proxy + Let's Encrypt SSL | `odoo_nginx.sh` |
+| `abo backup` | Back up every database an instance owns | `odoo_backup.sh` |
+| `abo update` | Pull the latest Odoo source and restart | `odoo_update.sh` |
+| `abo remove` | Delete an instance and everything it owns | `odoo_remove.sh` |
 
 ```bash
-sudo odoo-install
-sudo odoo-install -u odoo18 -y
-sudo odoo-nginx -u odoo18 -d erp.mycompany.com -e admin@mycompany.com
-sudo odoo-backup -u odoo18 -f
+sudo abo install
+sudo abo install -u odoo18 -y
+sudo abo nginx  -u odoo18 -d erp.mycompany.com -e admin@mycompany.com
+sudo abo backup -u odoo18 -f
+sudo abo update -u odoo18
+sudo abo remove -u odoo18
+
+abo help                # all commands
+abo backup -h           # options for one command
+abo version             # version, and where the scripts live
 ```
 
-`odoo-install` finds its companions on `PATH`, so the repository no longer has to be present — or even checked out — after installing.
+`abo` goes in `/usr/local/bin`; the scripts go in `/usr/local/lib/abo/` alongside `requirements.txt`. The repository does not need to stay checked out afterwards.
 
 ```bash
 sudo make install PREFIX=/usr    # somewhere else
-sudo make uninstall              # remove all four files
+sudo make uninstall              # remove everything installed
 make check                       # shellcheck + bash -n
 ```
 
-Running the scripts straight out of the checkout keeps working exactly as before; installing is optional.
+Running the scripts straight out of the checkout keeps working exactly as before — `./abo install` and `sudo ./odoo_install.sh` are equivalent. Installing is optional.
+
+> The name is `abo`, not `ab`: `ab` is ApacheBench from `apache2-utils`, and since `/usr/local/bin` precedes `/usr/bin` on `PATH`, installing as `ab` would silently shadow it.
 
 ### Express install
 
@@ -309,6 +319,50 @@ A domain that does not point at the server is the usual reason SSL fails, and Le
 The server's own address is taken from `hostname -I` **plus** its public IP (via `api.ipify.org`), because on a cloud VM behind 1:1 NAT — AWS, GCP, Azure — `hostname -I` only reports a private address and every domain would look mispointed. If that lookup fails the check still runs against local addresses only.
 
 Running `odoo_nginx.sh` standalone performs the same check and asks once before spending a certificate attempt. Pass `-y` to skip that question.
+
+## Updating an Instance
+
+```bash
+sudo abo update -u odoo18          # source code only
+sudo abo update -u odoo18 -m       # source code + module data
+```
+
+Without `-m` this is source-only and safe on a live instance: fetch the instance's own branch, `git reset --hard`, reinstall pip requirements **only if `requirements.txt` actually changed**, restart, then wait for the port to accept a connection before reporting success. If Odoo does not come back up, the rollback command is printed with the previous commit already filled in.
+
+`-m` additionally runs `odoo-bin -u all` against every database the instance owns. That rewrites module data and cannot be undone, so the service is stopped first and **a full backup is taken automatically** — the script refuses to run `-u all` if `odoo_backup.sh` is not available. `-n` skips the backup and accepts the risk.
+
+| Flag | Meaning |
+|------|---------|
+| `-u <username>` | Instance to update (required) |
+| `-m` | Also upgrade module data (`-u all`) on every database |
+| `-n` | Skip the pre-upgrade backup. Only meaningful with `-m` |
+| `-y` | Do not ask for confirmation |
+
+The clone is shallow (`--depth 1`), and the update keeps it that way — it never unshallows and never runs `git clean`, because the virtualenv lives at `odoo/venv`, inside the work tree but untracked.
+
+This updates **within a series** (18.0 → 18.0). Moving between series (17.0 → 18.0) is a database migration, not an update; this script will not attempt one.
+
+## Removing an Instance
+
+```bash
+sudo abo remove -u odoo18
+```
+
+Deletes the service, the databases, the PostgreSQL role, `/home/<user>` including the filestore, the account, the Nginx site, the logrotate rule, the backup cron entry, the UFW rule, and the installer's saved state.
+
+Before anything is touched it prints exactly what it found — every database with its size, the home directory with its size, the Nginx site by name — and then requires **the username to be typed back**. There is no `-y`, and it refuses to run without a terminal.
+
+A full backup is written to `/root/abo-removed/` first, with retention set to 100 years so the nightly prune cannot delete the only remaining copy. If the backup fails, nothing is removed.
+
+| Flag | Meaning |
+|------|---------|
+| `-u <username>` | Instance to remove (required) |
+| `-k` | Keep the databases and the PostgreSQL role |
+| `-n` | Skip the safety backup — the data is then gone for good |
+
+Guards, in order: refuses `root`, `postgres`, `www-data`, `nobody`, `ubuntu`, `daemon`, `sync`, `bin`, `sys`; refuses any account with UID below 1000; deletes the home directory last, so a failure anywhere earlier still leaves the data on disk.
+
+TLS certificates are deliberately **not** removed — `certbot delete --cert-name <domain>` is printed instead, since certificates are often shared or reissued against rate limits.
 
 ## Automated Backups
 

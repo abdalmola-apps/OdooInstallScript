@@ -1,41 +1,51 @@
-# Install the three scripts as system commands.
+# Install the toolkit as a single `abo` command.
 #
-#   sudo make install                 -> /usr/local/bin/odoo-install, ...
-#   sudo make install PREFIX=/usr     -> /usr/bin/odoo-install, ...
+#   sudo make install                 -> /usr/local/bin/abo
+#   sudo make install PREFIX=/usr     -> /usr/bin/abo
 #   sudo make uninstall
-#   make check                        -> shellcheck (the only checker here)
+#   make check                        -> shellcheck + bash -n (the only checks here)
+#
+# The subcommand scripts go in <prefix>/lib/abo rather than on PATH: they are
+# named odoo_*.sh and would collide with nothing, but they are implementation,
+# and keeping them together is what lets each one find its siblings.
 #
 # DESTDIR is honoured for packaging.
 
 PREFIX  ?= /usr/local
 BINDIR   = $(DESTDIR)$(PREFIX)/bin
-DATADIR  = $(DESTDIR)$(PREFIX)/share/odoo-install
+LIBDIR   = $(DESTDIR)$(PREFIX)/lib/abo
 
-SCRIPTS  = odoo_install.sh odoo_nginx.sh odoo_backup.sh
-COMMANDS = odoo-install odoo-nginx odoo-backup
+SCRIPTS = odoo_install.sh odoo_nginx.sh odoo_backup.sh odoo_update.sh odoo_remove.sh
+
+# Removed in 2.3.0, when the three flat commands became `abo` subcommands.
+LEGACY = odoo-install odoo-nginx odoo-backup
 
 .PHONY: all install uninstall check
 
 all:
 	@echo "Nothing to build — these are shell scripts."
-	@echo "Run 'sudo make install' to put them on PATH."
+	@echo "Run 'sudo make install' to put 'abo' on PATH."
 
 install:
-	install -d $(BINDIR) $(DATADIR)
-	install -m 755 odoo_install.sh $(BINDIR)/odoo-install
-	install -m 755 odoo_nginx.sh   $(BINDIR)/odoo-nginx
-	install -m 755 odoo_backup.sh  $(BINDIR)/odoo-backup
-	install -m 644 requirements.txt $(DATADIR)/requirements.txt
+	install -d $(BINDIR) $(LIBDIR)
+	install -m 755 abo $(BINDIR)/abo
+	install -m 755 $(SCRIPTS) $(LIBDIR)/
+	install -m 644 requirements.txt $(LIBDIR)/requirements.txt
+	@rm -f $(addprefix $(BINDIR)/,$(LEGACY))
+	@rm -rf $(DESTDIR)$(PREFIX)/share/odoo-install
 	@echo ""
-	@echo "Installed: $(COMMANDS) in $(DESTDIR)$(PREFIX)/bin"
-	@echo "Start with: sudo odoo-install"
+	@echo "Installed: $(BINDIR)/abo"
+	@echo "Scripts:   $(LIBDIR)/"
+	@echo ""
+	@echo "  sudo abo install      provision an instance"
+	@echo "  abo help              all commands"
 
 uninstall:
-	rm -f $(addprefix $(BINDIR)/,$(COMMANDS))
-	rm -f $(DATADIR)/requirements.txt
-	-rmdir $(DATADIR) 2>/dev/null || true
+	rm -f $(BINDIR)/abo
+	rm -f $(addprefix $(BINDIR)/,$(LEGACY))
+	rm -rf $(LIBDIR)
 
 check:
-	shellcheck $(SCRIPTS)
-	@for f in $(SCRIPTS); do bash -n $$f || exit 1; done
+	shellcheck abo $(SCRIPTS)
+	@for f in abo $(SCRIPTS); do bash -n $$f || exit 1; done
 	@echo "OK"

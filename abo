@@ -1,0 +1,102 @@
+#!/bin/bash
+
+# ==============================================================================
+# abo — Odoo deployment toolkit
+#
+# One entry point for the scripts in this repository. Each subcommand is a
+# standalone script that still works when run directly; this only finds and
+# execs the right one, passing every remaining argument through untouched.
+#
+#   abo install    provision a new Odoo instance
+#   abo nginx      Nginx reverse proxy + Let's Encrypt SSL
+#   abo backup     back up an instance's databases
+#   abo update     pull the latest Odoo source and restart
+#   abo remove     delete an instance and everything it owns
+#
+# Author: abdalmola
+# License: LGPL-3
+# ==============================================================================
+
+set -euo pipefail
+
+readonly ABO_VERSION="1.0.0"
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# A git checkout keeps the scripts beside this file; `make install` puts this
+# file in <prefix>/bin and the scripts in <prefix>/lib/abo.
+LIBDIR=""
+for d in "$SELF_DIR" "$SELF_DIR/../lib/abo"; do
+    if [ -f "$d/odoo_install.sh" ]; then
+        LIBDIR="$(cd "$d" && pwd)"
+        break
+    fi
+done
+
+if [ -z "$LIBDIR" ]; then
+    echo "abo: cannot find the Odoo scripts." >&2
+    echo "     Looked in $SELF_DIR and $SELF_DIR/../lib/abo" >&2
+    echo "     Reinstall with 'sudo make install', or run the scripts directly." >&2
+    exit 1
+fi
+
+usage() {
+    cat <<EOF
+abo v${ABO_VERSION} — Odoo deployment toolkit
+
+Usage: abo <command> [options]
+
+Commands:
+  install    Provision a new Odoo instance (interactive, or -y for defaults)
+  nginx      Add an Nginx reverse proxy and Let's Encrypt SSL to an instance
+  backup     Back up every database an instance owns
+  update     Pull the latest Odoo source for an instance and restart it
+  remove     Delete an instance: service, databases, files, Nginx site
+
+Every command takes -h for its own options:
+
+  sudo abo install
+  sudo abo install -u odoo18 -y
+  sudo abo nginx  -u odoo18 -d erp.example.com -e admin@example.com
+  sudo abo backup -u odoo18 -f
+  sudo abo update -u odoo18
+  sudo abo remove -u odoo18
+
+  abo backup -h            options for one command
+  abo version              version and script location
+EOF
+}
+
+run() {
+    local script="$LIBDIR/$1"
+    shift
+    if [ ! -f "$script" ]; then
+        echo "abo: $script is missing from this installation." >&2
+        exit 1
+    fi
+    exec bash "$script" "$@"
+}
+
+CMD="${1:-}"
+[ $# -gt 0 ] && shift
+
+case "$CMD" in
+    install) run odoo_install.sh "$@" ;;
+    nginx)   run odoo_nginx.sh   "$@" ;;
+    backup)  run odoo_backup.sh  "$@" ;;
+    update)  run odoo_update.sh  "$@" ;;
+    remove)  run odoo_remove.sh  "$@" ;;
+    version|--version|-v)
+        echo "abo $ABO_VERSION"
+        echo "scripts: $LIBDIR"
+        ;;
+    ""|help|--help|-h)
+        usage
+        ;;
+    *)
+        echo "abo: unknown command '$CMD'" >&2
+        echo "" >&2
+        usage >&2
+        exit 1
+        ;;
+esac

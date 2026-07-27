@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Three standalone Bash scripts that deploy production Odoo on Ubuntu (20.04/22.04/24.04). No build, no test suite, no CI. `requirements.txt` is payload — extra Python packages installed into the target server's venv, not this repo's deps.
+Five standalone Bash scripts that deploy and manage production Odoo on Ubuntu (20.04/22.04/24.04), plus `abo`, a dispatcher that fronts them. No build, no test suite, no CI. `requirements.txt` is payload — extra Python packages installed into the target server's venv, not this repo's deps.
+
+**`abo` is a dispatcher and nothing else.** It resolves `LIBDIR` (its own directory in a checkout, `../lib/abo` when installed) and `exec`s `odoo_<cmd>.sh` with every argument passed through untouched. Never put logic in it — each subcommand script must keep working when run directly, which is what the "Which files do I need?" table in the README promises. Adding a subcommand is one `case` arm plus one line in the Makefile's `SCRIPTS`.
+
+The `Makefile` installs `abo` to `<prefix>/bin` and the scripts to `<prefix>/lib/abo`. Co-locating them there is what makes `find_companion` work unchanged in both layouts. `install` also removes the `odoo-install`/`odoo-nginx`/`odoo-backup` commands from 2.3.0 and the old `share/odoo-install` directory; drop that cleanup once nobody is upgrading across it.
 
 ## Commands
 
@@ -63,6 +67,10 @@ Certbot is invoked `--redirect --keep-until-expiring` — the first because the 
 **Input flow.** All prompts + the confirmation summary run before any system mutation. Prompts loop until valid (except the addon-URL list, which exits 1 on a bad URL). Keep new prompts in that pre-mutation block.
 
 **Auto-tuning** (derived-variables block, ~line 293): `workers = min(cores*2+1, RAM_MB/256)` floored at 2; soft memory limit = 80% RAM split across `workers + cron + 1`; hard = soft*1.2; `db_maxconn = workers*2+4`. Values land in both the config file and the summary output — update both.
+
+**`odoo_update.sh` must never unshallow or clean.** The installer clones `--depth 1`, so the update fetches `--depth 1` too; unshallowing pulls ~2GB nobody asked for. It uses `git reset --hard FETCH_HEAD` and never `git clean` — the venv sits at `$OE_HOME_EXT/venv`, inside the work tree but untracked, so a clean would delete the interpreter mid-update. Requirements are reinstalled only when `sha256sum requirements.txt` differs across the reset. `-m` (`odoo-bin -u all`) stops the service first and hard-fails if no `odoo_backup.sh` can be found, because module-data upgrades are not reversible.
+
+**`odoo_remove.sh` is the only destructive script.** Order matters and is deliberate: inventory → plan → typed confirmation → backup → service → nginx → cron → databases → role → logrotate → state → UFW → `userdel -r` last, so a failure anywhere earlier still leaves the data on disk. It refuses non-interactive stdin, refuses a hardcoded list of system accounts, and refuses any UID below 1000. It finds the Nginx site by grepping `sites-available` for `upstream ${OE_USER}_odoo` rather than guessing the filename, since sites are named after the domain. Backups go to `/root/abo-removed` with `-r 36500` so the retention sweep cannot prune the last remaining copy. TLS certs are intentionally left in place.
 
 **Backup selection logic.** Databases are discovered by PostgreSQL ownership (`pg_database.datdba` = the `$OE_USER` role), then ordered by `MAX(write_date)` from `res_users` so the most active DB dumps first; non-Odoo DBs fall back to epoch and sort last. Dumps are `pg_dump -Fc -Z5`; retention prunes by `find -mtime`.
 
