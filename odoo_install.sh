@@ -931,13 +931,35 @@ if step 19 "Set Up Automated Backups"; then
             CRON_HOUR="${BACKUP_HOUR%%:*}"
             CRON_MIN="${BACKUP_HOUR##*:}"
 
+            # cron is standard on Ubuntu Server but absent from minimal cloud
+            # and container images, and an installed-but-stopped cron service
+            # would leave the job silently never running.
+            if ! command -v crontab &> /dev/null; then
+                log_info "Installing cron..."
+                apt_get install -y cron
+            fi
+            sudo systemctl enable --now cron >/dev/null 2>&1 || \
+                log_warn "Could not enable the cron service — check 'systemctl status cron'."
+
             # Install cron job
             CRON_LINE="$CRON_MIN $CRON_HOUR * * * $BACKUP_SCRIPT_DST $BACKUP_FLAGS >> $OE_DATA_DIR/backup.log 2>&1"
-            ( sudo crontab -l 2>/dev/null | grep -v "$BACKUP_SCRIPT_DST" ; echo "$CRON_LINE" ) | sudo crontab -
 
-            log_success "Backup cron job installed (daily at $BACKUP_HOUR)."
-            log_info "Cron entry: $CRON_LINE"
-            log_info "Backup directory: $OE_HOME/backups"
+            # `|| true` covers both empty cases, either of which used to abort
+            # the whole run with a bare exit 1 under `set -e` + pipefail:
+            # root having no crontab at all (every fresh server), and grep -v
+            # filtering out the only line there is (every re-run).
+            { sudo crontab -l 2>/dev/null | grep -vF "$BACKUP_SCRIPT_DST" || true
+              echo "$CRON_LINE"; } | sudo crontab -
+
+            # Read it back — `crontab -` reports nothing useful on a rejected file.
+            if sudo crontab -l 2>/dev/null | grep -qF "$BACKUP_SCRIPT_DST"; then
+                log_success "Backup cron job installed (daily at $BACKUP_HOUR)."
+                log_info "Cron entry: $CRON_LINE"
+                log_info "Backup directory: $OE_HOME/backups"
+            else
+                log_error "Cron job did not install. Add it manually with 'sudo crontab -e':"
+                log_error "  $CRON_LINE"
+            fi
         fi
     else
         log_info "Automated backups skipped (not selected)."
