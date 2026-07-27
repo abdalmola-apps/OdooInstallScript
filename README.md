@@ -291,6 +291,27 @@ When Nginx is enabled, the script creates a full production config with:
 - `client_max_body_size 200m`
 - Let's Encrypt SSL via Certbot with forced HTTP→HTTPS redirect, HTTP/2, and auto-renewal verified
 
+### The `www` name
+
+If `www.<domain>` points at the same server, it is added to `server_name` **and** to the certificate automatically. This is not cosmetic: the Odoo site is the only enabled Nginx site, which makes it the default server, so `www.example.com` reaches it regardless — and without being on the certificate the browser shows *Not secure*.
+
+The name is included only when it genuinely resolves to this server. A `-d` for a name that fails validation fails the **entire** certificate request, not just that name, so an unused `www` record would cost you SSL altogether.
+
+| `www` record | Result |
+|---|---|
+| Points here | `server_name example.com www.example.com`, cert covers both |
+| Does not exist | Apex only — no attempt, no risk to the certificate |
+| Points elsewhere | Apex only |
+| Domain is already `www.*` | Left alone |
+
+Certbot is called with `--expand`, so adding a `www` record to a server that already has an apex-only certificate and re-running picks it up:
+
+```bash
+sudo abo nginx -u odoo18 -d example.com -e admin@example.com
+```
+
+Without `--expand`, certbot refuses non-interactively when the domain set grows and the new name silently stays uncovered.
+
 ### DNS check
 
 A domain that does not point at the server is the usual reason SSL fails, and Let's Encrypt rate-limits **failed validations to 5 per hostname per hour** — so two careless retries cost you an hour. The installer checks this straight after the prompts, before a single package is installed:

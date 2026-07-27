@@ -205,7 +205,44 @@ log_success "Nginx and Certbot installed."
 # Step 2: Write Nginx Site Config
 # ==============================================================================
 
-log_info "Creating Nginx site config for $OE_DOMAIN..."
+# Needed here as well as at certificate time: whether to serve www depends on
+# where it points. hostname -I misses the public address on a cloud VM behind
+# 1:1 NAT, so ask what the outside world sees too.
+PUBLIC_IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+LOCAL_IPS="$({ hostname -I | tr ' ' '\n'; printf '%s\n' "$PUBLIC_IP"; } | grep -v '^$' | sort -u)"
+
+resolves_here() {
+    local ips
+    ips="$(getent ahosts "$1" 2>/dev/null | awk '{print $1}' | sort -u)"
+    [ -n "$ips" ] || return 1
+    comm -12 <(echo "$ips") <(echo "$LOCAL_IPS") | grep -q .
+}
+
+# A www name that points here but is missing from server_name still reaches this
+# block — it is the only enabled site, so it is also the default server — and
+# gets served the apex certificate, which is exactly the "Not secure" warning
+# people hit. Include it when it genuinely points here, and only then: a -d for
+# a name that fails validation fails the entire certificate, not just that name.
+WWW_DOMAIN=""
+case "$OE_DOMAIN" in
+    www.*) ;;
+    *)
+        if resolves_here "www.$OE_DOMAIN"; then
+            WWW_DOMAIN="www.$OE_DOMAIN"
+            log_info "www.$OE_DOMAIN points here too — adding it to the site and certificate."
+        fi
+        ;;
+esac
+
+if [ -n "$WWW_DOMAIN" ]; then
+    SERVER_NAMES="$OE_DOMAIN $WWW_DOMAIN"
+else
+    SERVER_NAMES="$OE_DOMAIN"
+fi
+
+SITE_CONF="/etc/nginx/sites-available/$OE_DOMAIN"
+
+log_info "Creating Nginx site config for $SERVER_NAMES..."
 
 # Upstream and map names are namespaced by user: they live in the shared http{}
 # scope, so a second instance reusing "odoo_backend"/"$connection_upgrade" makes
@@ -227,7 +264,7 @@ map \$http_upgrade \$${OE_USER}_conn_upgrade {
 
 server {
     listen 80;
-    server_name $OE_DOMAIN;
+    server_name $SERVER_NAMES;
 
     # Logging
     access_log /var/log/nginx/${OE_USER}-odoo-access.log;
@@ -325,11 +362,6 @@ log_success "Nginx reloaded with new config."
 DNS_OK=true
 SKIP_SSL=false
 
-# hostname -I misses the public address on a cloud VM behind 1:1 NAT, so ask
-# what the outside world sees too before calling a domain mispointed.
-PUBLIC_IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
-LOCAL_IPS="$({ hostname -I | tr ' ' '\n'; printf '%s\n' "$PUBLIC_IP"; } | grep -v '^$' | sort -u)"
-
 RESOLVED_IPS="$(getent ahosts "$OE_DOMAIN" | awk '{print $1}' | sort -u || true)"
 if [ -z "$RESOLVED_IPS" ]; then
     log_warn "$OE_DOMAIN does not resolve. Certbot will almost certainly fail."
@@ -353,29 +385,37 @@ if [ "$DNS_OK" = false ] && [ "$NON_INTERACTIVE" = false ] && [ -t 0 ]; then
     fi
 fi
 
+CERT_DOMAINS=(-d "$OE_DOMAIN")
+if [ -n "$WWW_DOMAIN" ]; then
+    CERT_DOMAINS+=(-d "$WWW_DOMAIN")
+fi
+
 if [ "$SKIP_SSL" = false ]; then
-    log_info "Requesting SSL certificate for $OE_DOMAIN..."
+    log_info "Requesting SSL certificate for $SERVER_NAMES..."
 fi
 # --redirect: force HTTP->HTTPS instead of leaving it to the certbot default,
 #             which has varied across releases.
 # --keep-until-expiring: makes re-runs idempotent rather than reissuing and
 #             burning the 5-duplicate-certs-per-week rate limit.
+# --expand: when a certificate already covers the apex and www has since been
+#           pointed here, the domain set has grown; without this certbot
+#           refuses non-interactively and the new name stays uncovered. It
+#           does nothing when the set is unchanged, so it costs no reissue.
 if [ "$SKIP_SSL" = true ]; then
     SSL_STATUS="skipped — DNS does not point here"
     log_warn "SSL skipped. The site is live over plain HTTP on port 80."
     log_warn "Once the A record points here, run:"
     log_warn "  sudo certbot --nginx -d $OE_DOMAIN -m $CERTBOT_EMAIL --redirect"
-elif certbot --nginx -d "$OE_DOMAIN" \
-    --non-interactive --agree-tos --redirect --keep-until-expiring \
+elif certbot --nginx "${CERT_DOMAINS[@]}" \
+    --non-interactive --agree-tos --redirect --keep-until-expiring --expand \
     -m "$CERTBOT_EMAIL"; then
     SSL_STATUS="Let's Encrypt"
-    log_success "SSL certificate obtained and installed."
+    log_success "SSL certificate obtained and installed for $SERVER_NAMES."
 
     # HTTP/2 — Odoo loads many small assets, so multiplexing is a real first-paint
     # win, and Certbot never enables it. nginx 1.25.1+ prefers a separate
     # `http2 on;` but still accepts this form; every nginx Ubuntu 20.04-24.04
     # ships (1.18-1.24) only accepts this one.
-    SITE_CONF="/etc/nginx/sites-available/$OE_DOMAIN"
     sed -i '/listen .*443 ssl/{/http2/!s/ ssl/ ssl http2/}' "$SITE_CONF"
 
     if nginx -t 2>/dev/null; then
@@ -400,7 +440,14 @@ else
     SSL_STATUS="failed — plain HTTP only"
     log_warn "Certbot failed — the site is still served over plain HTTP on port 80."
     log_warn "Common causes: DNS not pointing here, or port 80 blocked upstream."
-    log_warn "Retry with: sudo certbot --nginx -d $OE_DOMAIN -m $CERTBOT_EMAIL --redirect"
+    log_warn "Retry with: sudo certbot --nginx ${CERT_DOMAINS[*]} -m $CERTBOT_EMAIL --redirect"
+    if [ -n "$WWW_DOMAIN" ]; then
+        # One name failing validation fails the whole request, so name the
+        # likely culprit rather than leaving them to retry the same thing.
+        log_warn "If only $WWW_DOMAIN is at fault, drop it:"
+        log_warn "  sudo certbot --nginx -d $OE_DOMAIN -m $CERTBOT_EMAIL --redirect"
+        log_warn "  then remove $WWW_DOMAIN from server_name in $SITE_CONF"
+    fi
 fi
 
 # ==============================================================================
@@ -457,7 +504,7 @@ echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║            Nginx Setup Complete!                        ║${NC}"
 echo -e "${GREEN}╠══════════════════════════════════════════════════════════╣${NC}"
-echo -e "${GREEN}║${NC} Domain:          ${BLUE}$OE_DOMAIN${NC}"
+echo -e "${GREEN}║${NC} Domain:          ${BLUE}$SERVER_NAMES${NC}"
 echo -e "${GREEN}║${NC} URL:             ${BLUE}$SITE_URL${NC}"
 echo -e "${GREEN}║${NC} Odoo Port:       $OE_PORT"
 echo -e "${GREEN}║${NC} Longpolling:     $OE_LONGPOLLING_PORT"
