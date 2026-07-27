@@ -36,6 +36,7 @@ OE_DOMAIN=""
 CERTBOT_EMAIL=""
 OE_PORT=8069
 OE_LONGPOLLING_PORT=""
+NON_INTERACTIVE=false
 
 # ==============================================================================
 # Utility Functions
@@ -82,6 +83,9 @@ Required:
 Options:
   -p <port>               Odoo HTTP port (default: 8069)
   -l <longpolling_port>   Longpolling port (default: port + 1)
+  -y                      Never prompt: attempt the certificate even if the
+                          domain does not resolve here (odoo_install.sh passes
+                          this because it runs the same check up front)
   -h                      Show this help message
 
 Examples:
@@ -98,13 +102,14 @@ EOF
 # Parse Arguments
 # ==============================================================================
 
-while getopts ":u:d:e:p:l:h" opt; do
+while getopts ":u:d:e:p:l:yh" opt; do
     case "$opt" in
         u) OE_USER="$OPTARG" ;;
         d) OE_DOMAIN="$OPTARG" ;;
         e) CERTBOT_EMAIL="$OPTARG" ;;
         p) OE_PORT="$OPTARG" ;;
         l) OE_LONGPOLLING_PORT="$OPTARG" ;;
+        y) NON_INTERACTIVE=true ;;
         h) usage ;;
         :) log_error "Option -$OPTARG requires an argument."; exit 1 ;;
         *) log_error "Unknown option: -$OPTARG"; usage ;;
@@ -317,24 +322,53 @@ log_success "Nginx reloaded with new config."
 # Pre-flight: a domain that does not point here is the usual cause of a failed
 # issuance, and Let's Encrypt rate-limits failures to 5/hostname/hour — cheap to
 # check with getent (glibc, no dnsutils needed) before spending an attempt.
+DNS_OK=true
+SKIP_SSL=false
+
+# hostname -I misses the public address on a cloud VM behind 1:1 NAT, so ask
+# what the outside world sees too before calling a domain mispointed.
+PUBLIC_IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+LOCAL_IPS="$({ hostname -I | tr ' ' '\n'; printf '%s\n' "$PUBLIC_IP"; } | grep -v '^$' | sort -u)"
+
 RESOLVED_IPS="$(getent ahosts "$OE_DOMAIN" | awk '{print $1}' | sort -u || true)"
 if [ -z "$RESOLVED_IPS" ]; then
     log_warn "$OE_DOMAIN does not resolve. Certbot will almost certainly fail."
-    log_warn "Add an A record pointing to this server, then re-run this script."
-elif ! comm -12 <(echo "$RESOLVED_IPS") <(hostname -I | tr ' ' '\n' | sort -u) | grep -q .; then
+    log_warn "Add an A record pointing to ${PUBLIC_IP:-this server}, then re-run this script."
+    DNS_OK=false
+elif ! comm -12 <(echo "$RESOLVED_IPS") <(echo "$LOCAL_IPS") | grep -q .; then
     log_warn "$OE_DOMAIN resolves to: $(echo "$RESOLVED_IPS" | tr '\n' ' ')"
-    log_warn "None of those match a local address. Fine behind NAT/Cloudflare/a load"
-    log_warn "balancer — otherwise the certificate request will fail."
+    log_warn "This server is:        $(echo "$LOCAL_IPS" | tr '\n' ' ')"
+    log_warn "Fine behind NAT/Cloudflare/a load balancer — otherwise the"
+    log_warn "certificate request will fail."
+    DNS_OK=false
 fi
 
-log_info "Requesting SSL certificate for $OE_DOMAIN..."
+# A standalone run gets the chance to fix DNS before spending an attempt; each
+# failed validation counts against Let's Encrypt's 5-per-hostname-per-hour cap.
+# odoo_install.sh passes -y because it already gated on this before installing.
+if [ "$DNS_OK" = false ] && [ "$NON_INTERACTIVE" = false ] && [ -t 0 ]; then
+    read -rp "Request the certificate anyway? (yes/no) [no]: " REPLY_SSL
+    if [ "${REPLY_SSL,,}" != "yes" ]; then
+        SKIP_SSL=true
+    fi
+fi
+
+if [ "$SKIP_SSL" = false ]; then
+    log_info "Requesting SSL certificate for $OE_DOMAIN..."
+fi
 # --redirect: force HTTP->HTTPS instead of leaving it to the certbot default,
 #             which has varied across releases.
 # --keep-until-expiring: makes re-runs idempotent rather than reissuing and
 #             burning the 5-duplicate-certs-per-week rate limit.
-if certbot --nginx -d "$OE_DOMAIN" \
+if [ "$SKIP_SSL" = true ]; then
+    SSL_STATUS="skipped — DNS does not point here"
+    log_warn "SSL skipped. The site is live over plain HTTP on port 80."
+    log_warn "Once the A record points here, run:"
+    log_warn "  sudo certbot --nginx -d $OE_DOMAIN -m $CERTBOT_EMAIL --redirect"
+elif certbot --nginx -d "$OE_DOMAIN" \
     --non-interactive --agree-tos --redirect --keep-until-expiring \
     -m "$CERTBOT_EMAIL"; then
+    SSL_STATUS="Let's Encrypt"
     log_success "SSL certificate obtained and installed."
 
     # HTTP/2 — Odoo loads many small assets, so multiplexing is a real first-paint
@@ -363,6 +397,7 @@ if certbot --nginx -d "$OE_DOMAIN" \
             log_warn "Could not enable certbot.timer. Renew manually: sudo certbot renew"
     fi
 else
+    SSL_STATUS="failed — plain HTTP only"
     log_warn "Certbot failed — the site is still served over plain HTTP on port 80."
     log_warn "Common causes: DNS not pointing here, or port 80 blocked upstream."
     log_warn "Retry with: sudo certbot --nginx -d $OE_DOMAIN -m $CERTBOT_EMAIL --redirect"
@@ -410,19 +445,28 @@ fi
 # Summary
 # ==============================================================================
 
+# Reflect what actually happened. A summary that says "SSL: Let's Encrypt" and
+# prints an https:// URL after certbot failed sends people to a dead port.
+if [ "$SSL_STATUS" = "Let's Encrypt" ]; then
+    SITE_URL="https://$OE_DOMAIN"
+else
+    SITE_URL="http://$OE_DOMAIN"
+fi
+
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║            Nginx Setup Complete!                        ║${NC}"
 echo -e "${GREEN}╠══════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║${NC} Domain:          ${BLUE}$OE_DOMAIN${NC}"
+echo -e "${GREEN}║${NC} URL:             ${BLUE}$SITE_URL${NC}"
 echo -e "${GREEN}║${NC} Odoo Port:       $OE_PORT"
 echo -e "${GREEN}║${NC} Longpolling:     $OE_LONGPOLLING_PORT"
-echo -e "${GREEN}║${NC} SSL:             Let's Encrypt"
+echo -e "${GREEN}║${NC} SSL:             $SSL_STATUS"
 echo -e "${GREEN}║${NC} Config:          /etc/nginx/sites-available/$OE_DOMAIN"
 echo -e "${GREEN}║${NC}"
 echo -e "${GREEN}║${NC} Test Commands:"
 echo -e "${GREEN}║${NC}   ${YELLOW}sudo nginx -t${NC}"
 echo -e "${GREEN}║${NC}   ${YELLOW}sudo systemctl status nginx${NC}"
-echo -e "${GREEN}║${NC}   ${YELLOW}curl -I https://$OE_DOMAIN${NC}"
+echo -e "${GREEN}║${NC}   ${YELLOW}curl -I $SITE_URL${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""

@@ -44,6 +44,10 @@ The websocket port key is version-conditional (`$GEVENT_KEY`): `gevent_port` on 
 
 **Nginx names are namespaced by `$OE_USER`** (`<user>_odoo`, `<user>_gevent`, `$<user>_conn_upgrade`). `upstream` and `map` live in the shared `http{}` scope, so a second instance reusing a generic name makes nginx refuse to start and takes the first site down with it. Never introduce a fixed name in that heredoc.
 
+**DNS is gated before mutation, not at step 15.** `odoo_install.sh` runs a `while [ "$INSTALL_NGINX" = "yes" ]` loop right after the prompt block's closing `fi` — so it covers all three input paths (express sets `INSTALL_NGINX=no`, so it no-ops there). `check_domain_dns` returns 0/1/2 (points here / elsewhere / no record) and leaves the addresses in `DNS_RESOLVED_IPS`. `server_ips` unions `hostname -I` with the public IP from `api.ipify.org`, because cloud VMs sit behind 1:1 NAT and local-only comparison false-positives on every one of them. The `s` branch flips `INSTALL_NGINX` to `no` and blanks the domain/email, which is why the gate must stay *above* `save_answers` and the companion-script check.
+
+`odoo_nginx.sh` repeats the check standalone and prompts before spending a certificate attempt; `odoo_install.sh` passes `-y` to suppress that second question. `SSL_STATUS` is assigned in all three certbot branches (skipped / issued / failed) and drives both the summary line and the printed URL scheme — a summary that says `https://` after certbot failed sends people to a closed port.
+
 Certbot is invoked `--redirect --keep-until-expiring` — the first because the default has moved between releases, the second so re-runs don't reissue and burn the 5-duplicates-per-week limit. HTTP/2 is patched in afterwards with a `sed` over the `listen …443 ssl` lines (certbot never enables it); the edit is idempotent and reverted if `nginx -t` fails.
 
 **apt is always called through `apt_get()`** (`odoo_install.sh`) or `APT_OPTS` (`odoo_nginx.sh`): `DPkg::Lock::Timeout=600` so unattended-upgrades holding the dpkg lock on a fresh server waits instead of aborting the run, plus noninteractive debconf/needrestart. Never call bare `apt-get`/`apt`.

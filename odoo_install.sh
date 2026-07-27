@@ -83,6 +83,27 @@ validate_git_url() {
     [[ "$1" =~ ^https://.*\.git$ ]] || [[ "$1" =~ ^git@.*\.git$ ]] || [[ "$1" =~ ^https://.+ ]]
 }
 
+# --- Domain / DNS ---
+
+# Filled in once, before the DNS gate. `hostname -I` alone misses the public
+# address on cloud VMs behind 1:1 NAT (AWS/GCP/Azure) — which is most of them —
+# so every domain would look mispointed.
+PUBLIC_IP=""
+
+server_ips() {
+    { hostname -I | tr ' ' '\n'; printf '%s\n' "$PUBLIC_IP"; } | grep -v '^$' | sort -u
+}
+
+# 0 = resolves to this server, 1 = resolves somewhere else, 2 = no record.
+# getent uses glibc, so no dnsutils dependency. Leaves the addresses it found in
+# DNS_RESOLVED_IPS for the caller to print.
+DNS_RESOLVED_IPS=""
+check_domain_dns() {
+    DNS_RESOLVED_IPS="$(getent ahosts "$1" 2>/dev/null | awk '{print $1}' | sort -u)"
+    [ -n "$DNS_RESOLVED_IPS" ] || return 2
+    comm -12 <(echo "$DNS_RESOLVED_IPS") <(server_ips) | grep -q . || return 1
+}
+
 # --- Odoo Versions ---
 
 readonly ODOO_REPO="https://github.com/odoo/odoo"
@@ -681,6 +702,65 @@ fi
 
 fi # end of the prompt block skipped when reusing saved answers
 
+# --- DNS gate -----------------------------------------------------------------
+# On every input path, and before anything is installed. Certbot cannot issue a
+# certificate for a domain that does not resolve to this server, and Let's
+# Encrypt rate-limits failed validations to 5 per hostname per hour — so two
+# careless retries cost an hour. Catching it here also means a fresh run, not a
+# half-installed one, when the fix is "add an A record and wait 5 minutes".
+if [ "$INSTALL_NGINX" = "yes" ]; then
+    PUBLIC_IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+fi
+
+while [ "$INSTALL_NGINX" = "yes" ]; do
+    check_domain_dns "$OE_DOMAIN" && dns_rc=0 || dns_rc=$?
+
+    if [ "$dns_rc" -eq 0 ]; then
+        log_success "DNS OK — $OE_DOMAIN points to this server."
+        break
+    fi
+
+    echo ""
+    if [ "$dns_rc" -eq 2 ]; then
+        log_warn "$OE_DOMAIN has no DNS record — it does not resolve at all."
+    else
+        log_warn "$OE_DOMAIN resolves to: $(echo "$DNS_RESOLVED_IPS" | tr '\n' ' ')"
+        log_warn "None of those is this server: $(server_ips | tr '\n' ' ')"
+    fi
+
+    cat <<EOF
+
+  Add this record at your DNS provider, then choose [r]:
+
+      Type   A
+      Name   $OE_DOMAIN
+      Value  ${PUBLIC_IP:-<the public IP of this server>}
+      TTL    300  (or the lowest offered)
+
+  At TTL 300 it is usually live in under 5 minutes. Check it yourself with:
+      getent ahosts $OE_DOMAIN
+
+  Behind Cloudflare's proxy (orange cloud), a load balancer or NAT the
+  addresses are meant to differ — that case is [c].
+
+EOF
+    # No tty (piped install) means no answer is coming — carry on rather than
+    # dying on EOF with nothing installed and nothing explaining why.
+    read -rp "  [r] re-check  [d] different domain  [c] continue anyway  [s] skip Nginx: " dns_choice \
+        || dns_choice="c"
+    case "${dns_choice,,}" in
+        d) read -rp "  Domain: " OE_DOMAIN ;;
+        c) log_warn "Continuing. If certbot fails, the site stays on plain HTTP."
+           break ;;
+        s) INSTALL_NGINX="no"
+           OE_DOMAIN=""
+           CERTBOT_EMAIL=""
+           log_info "Nginx and SSL skipped — Odoo will answer on port $OE_PORT directly."
+           break ;;
+        *) : ;; # r, or Enter: loop and re-check the same domain
+    esac
+done
+
 # Runs either way: on a reused run these come from the answers file, and the
 # addon list is stored as the raw input string rather than a serialised array.
 RAM_MB=$(get_total_ram_mb)
@@ -1206,12 +1286,15 @@ if step 15 "Configure Nginx & SSL"; then
         fi
 
         log_info "Running odoo_nginx.sh..."
+        # -y: the DNS gate above already asked. Without it the sub-script would
+        # ask the same question a second time.
         sudo bash "$NGINX_SCRIPT" \
             -u "$OE_USER" \
             -d "$OE_DOMAIN" \
             -e "$CERTBOT_EMAIL" \
             -p "$OE_PORT" \
-            -l "$OE_LONGPOLLING_PORT"
+            -l "$OE_LONGPOLLING_PORT" \
+            -y
 
         log_success "Nginx configured via odoo_nginx.sh."
     else

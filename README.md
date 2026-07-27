@@ -85,7 +85,7 @@ The script prompts for the following (with validation and defaults):
 | Odoo version | `18.0` | Pick from a menu of the current release branches, or type any version — checked against `odoo/odoo` before the install starts |
 | HTTP port | *first free pair from `8069`* | Range 1024-65535, and both the port and the one above it must be free |
 | Install Nginx? | `no` | yes/no |
-| Domain name | *(required if Nginx)* | Valid FQDN |
+| Domain name | *(required if Nginx)* | Valid FQDN, and its DNS is checked against this server before anything is installed — see [DNS check](#dns-check) |
 | Certbot email | *(required if Nginx)* | Valid email |
 | Custom addon Git URLs | *(optional)* | Comma-separated, validated |
 | Set up swap? | Auto (`yes` if RAM < 4GB) | yes/no |
@@ -248,6 +248,35 @@ When Nginx is enabled, the script creates a full production config with:
 - `client_max_body_size 200m`
 - Let's Encrypt SSL via Certbot with forced HTTP→HTTPS redirect, HTTP/2, and auto-renewal verified
 
+### DNS check
+
+A domain that does not point at the server is the usual reason SSL fails, and Let's Encrypt rate-limits **failed validations to 5 per hostname per hour** — so two careless retries cost you an hour. The installer checks this straight after the prompts, before a single package is installed:
+
+```
+[WARN] erp.mycompany.com resolves to: 198.51.100.7
+[WARN] None of those is this server: 10.0.0.5 203.0.113.9
+
+  Add this record at your DNS provider, then choose [r]:
+
+      Type   A
+      Name   erp.mycompany.com
+      Value  203.0.113.9
+      TTL    300  (or the lowest offered)
+
+  [r] re-check  [d] different domain  [c] continue anyway  [s] skip Nginx:
+```
+
+| Choice | What happens |
+|--------|--------------|
+| `r` | Re-resolves the same domain. Add the A record in another tab, wait, press `r`. At TTL 300 it is usually live in under 5 minutes. |
+| `d` | Type a different domain and check that one instead. |
+| `c` | Proceed anyway. **The right answer behind Cloudflare's proxy (orange cloud), a load balancer, or NAT** — the addresses are supposed to differ there. If certbot then fails, the site stays on plain HTTP and the command to retry is printed. |
+| `s` | Drop Nginx and SSL from this run. Odoo is reachable at `http://<server-ip>:<port>`; run `odoo_nginx.sh` later once DNS is ready. |
+
+The server's own address is taken from `hostname -I` **plus** its public IP (via `api.ipify.org`), because on a cloud VM behind 1:1 NAT — AWS, GCP, Azure — `hostname -I` only reports a private address and every domain would look mispointed. If that lookup fails the check still runs against local addresses only.
+
+Running `odoo_nginx.sh` standalone performs the same check and asks once before spending a certificate attempt. Pass `-y` to skip that question.
+
 ## Automated Backups
 
 When backups are enabled during installation, the script installs `odoo_backup.sh` and a cron job that runs daily at 2:00 AM.
@@ -340,6 +369,7 @@ sudo ./odoo_nginx.sh -u odoo18 -d erp.mycompany.com -e admin@mycompany.com -p 80
 | `-e <email>` | Let's Encrypt email (required) | — |
 | `-p <port>` | Odoo HTTP port | `8069` |
 | `-l <port>` | Longpolling port | port + 1 |
+| `-y` | Never prompt — request the certificate even if the domain does not resolve here. `odoo_install.sh` passes this because it runs the same check up front | off |
 | `-h` | Show help | — |
 
 ### What It Does
