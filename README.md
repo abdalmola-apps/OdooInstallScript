@@ -362,6 +362,31 @@ A full backup is written to `/root/abo-removed/` first, with retention set to 10
 
 Guards, in order: refuses `root`, `postgres`, `www-data`, `nobody`, `ubuntu`, `daemon`, `sync`, `bin`, `sys`; refuses any account with UID below 1000; deletes the home directory last, so a failure anywhere earlier still leaves the data on disk.
 
+### If the PostgreSQL role owns objects elsewhere
+
+`DROP ROLE` fails when the role still owns tables, schemas or grants in a database that is not being dropped. The script **stops** rather than continuing — an orphaned PostgreSQL role whose Unix account no longer exists is a problem nobody thinks to look for.
+
+It is checked twice. Before anything is touched, `pg_shdepend` is queried for objects owned by the role in databases other than this instance's; if any turn up, the run aborts with nothing removed:
+
+```
+[ERROR] Role 'cavecode' owns objects outside this instance:
+[ERROR]   - billing_prod
+
+[ERROR] DROP ROLE would fail, so nothing has been removed.
+
+[ERROR] Resolve it by reassigning or dropping what the role owns. In each
+[ERROR] database listed above:
+[ERROR]   sudo -u postgres psql -d <database> \
+[ERROR]     -c 'REASSIGN OWNED BY "cavecode" TO postgres' \
+[ERROR]     -c 'DROP OWNED BY "cavecode"'
+
+[ERROR] Or keep the databases and role with:  odoo_remove.sh -u cavecode -k
+```
+
+The second check is `dropuser` itself — PostgreSQL's own verdict, and the authoritative one. If it fails there, the script exits non-zero **before** `userdel`, so the account and home directory survive and the state is recoverable. It prints what was already removed and the command to re-run once the ownership is resolved.
+
+`-k` sidesteps the whole question by keeping both the databases and the role.
+
 TLS certificates are deliberately **not** removed — `certbot delete --cert-name <domain>` is printed instead, since certificates are often shared or reissued against rate limits.
 
 ## Automated Backups

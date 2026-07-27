@@ -65,6 +65,9 @@ Options:
 Always asks for the username to be typed back before touching anything. There
 is deliberately no unattended mode.
 
+If the PostgreSQL role owns objects in databases other than this instance's,
+the script stops before removing anything and tells you what to reassign.
+
 Examples:
   # Remove an instance, backing it up to $SAFE_DIR first
   sudo $0 -u odoo18
@@ -153,6 +156,26 @@ if command -v psql >/dev/null 2>&1 && \
     HAS_ROLE=true
 fi
 
+# Does the role own anything outside the databases we are about to drop? If so
+# DROP ROLE will fail, and finding that out after the databases are gone is too
+# late to be useful. pg_shdepend is the cluster-wide record of role
+# dependencies; rows whose containing database is itself owned by this role are
+# excluded, because those databases are being dropped anyway.
+ROLE_BLOCKERS=""
+if [ "$HAS_ROLE" = true ] && [ "$KEEP_DATABASES" = false ]; then
+    ROLE_BLOCKERS=$(sudo -u postgres psql -tAc "
+        SELECT DISTINCT COALESCE(d.datname, 'cluster-wide object')
+        FROM pg_shdepend s
+        LEFT JOIN pg_database d ON d.oid = s.dbid
+        WHERE s.refobjid = (SELECT oid FROM pg_roles WHERE rolname = '$OE_USER')
+          AND s.deptype IN ('o', 'a')
+          AND CASE
+                WHEN s.dbid = 0 THEN s.classid <> 'pg_database'::regclass
+                ELSE d.datdba IS DISTINCT FROM
+                     (SELECT oid FROM pg_roles WHERE rolname = '$OE_USER')
+              END;" 2>/dev/null) || true
+fi
+
 HOME_SIZE="n/a"
 [ -d "$OE_HOME" ] && HOME_SIZE="$(du -sh "$OE_HOME" 2>/dev/null | cut -f1)"
 
@@ -170,6 +193,31 @@ HAS_LOGROTATE=false
 CRON_LINES=0
 if command -v crontab >/dev/null 2>&1; then
     CRON_LINES=$(crontab -l 2>/dev/null | grep -cF "odoo_backup.sh -u $OE_USER" || true)
+fi
+
+# ==============================================================================
+# Stop before touching anything if the role cannot be dropped
+# ==============================================================================
+
+if [ -n "$ROLE_BLOCKERS" ]; then
+    echo ""
+    log_error "Role '$OE_USER' owns objects outside this instance:"
+    while read -r b; do
+        if [ -n "$b" ]; then
+            log_error "  - $b"
+        fi
+    done <<< "$ROLE_BLOCKERS"
+    echo ""
+    log_error "DROP ROLE would fail, so nothing has been removed."
+    echo ""
+    log_error "Resolve it by reassigning or dropping what the role owns. In each"
+    log_error "database listed above:"
+    log_error "  sudo -u postgres psql -d <database> \\"
+    log_error "    -c 'REASSIGN OWNED BY \"$OE_USER\" TO postgres' \\"
+    log_error "    -c 'DROP OWNED BY \"$OE_USER\"'"
+    echo ""
+    log_error "Or keep the databases and role with:  $0 -u $OE_USER -k"
+    exit 1
 fi
 
 # ==============================================================================
@@ -325,10 +373,24 @@ if [ "$KEEP_DATABASES" = false ]; then
     fi
 
     if [ "$HAS_ROLE" = true ]; then
+        # The pg_shdepend check above is predictive; this is PostgreSQL's own
+        # verdict and the one that counts. Stop here rather than continue —
+        # deleting the Unix account while its PostgreSQL role survives leaves an
+        # orphaned owner nobody will think to look for.
         if sudo -u postgres dropuser --if-exists "$OE_USER"; then
             log_success "PostgreSQL role '$OE_USER' dropped."
         else
-            log_warn "Could not drop role '$OE_USER' — it may still own objects elsewhere."
+            echo ""
+            log_error "DROP ROLE '$OE_USER' failed — see the PostgreSQL error above."
+            log_error "Stopping here. The account and $OE_HOME are untouched."
+            echo ""
+            log_error "Already removed: service, Nginx site, cron, and the databases"
+            log_error "listed in the plan. Reassign what the role still owns:"
+            log_error "  sudo -u postgres psql -d <database> \\"
+            log_error "    -c 'REASSIGN OWNED BY \"$OE_USER\" TO postgres' \\"
+            log_error "    -c 'DROP OWNED BY \"$OE_USER\"'"
+            log_error "then re-run: $0 -u $OE_USER -n"
+            exit 1
         fi
     fi
 fi
