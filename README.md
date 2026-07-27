@@ -177,14 +177,15 @@ Example for a 2-core / 4GB server: 5 workers, ~550MB soft limit per worker, 14 m
 
 When Nginx is enabled, the script creates a full production config with:
 
-- Upstream blocks for Odoo HTTP and longpolling
+- Upstream blocks for Odoo HTTP and websocket/longpolling, named per user (`<user>_odoo`, `<user>_gevent`) so multiple instances coexist
 - WebSocket support (`/websocket` location with upgrade headers)
 - Longpolling proxy (`/longpolling`)
-- Static file caching (`/web/static/` with 24h expiry)
+- Static file caching for every module (`/<module>/static/`, 24h expiry)
 - Gzip compression on text types
 - Proper proxy headers (`X-Forwarded-Host`, `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Real-IP`)
+- Security headers: HSTS, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`
 - `client_max_body_size 200m`
-- Let's Encrypt SSL via Certbot (automated, with graceful fallback)
+- Let's Encrypt SSL via Certbot with forced HTTP→HTTPS redirect, HTTP/2, and auto-renewal verified
 
 ## Automated Backups
 
@@ -271,10 +272,11 @@ sudo ./odoo_nginx.sh -u odoo18 -d erp.mycompany.com -e admin@mycompany.com -p 80
 ### What It Does
 
 1. Installs Nginx, Certbot, and python3-certbot-nginx
-2. Writes the Nginx site config (upstream blocks, WebSocket support, static caching, gzip)
-3. Enables the site, removes the default site, tests and reloads Nginx
-4. Requests a Let's Encrypt SSL certificate via Certbot
-5. Sets `proxy_mode = True` in the Odoo config (if found)
+2. Writes the Nginx site config (per-user upstreams, WebSocket support, static caching, gzip, security headers)
+3. Enables the site, removes the default site, tests and reloads Nginx — unlinking the site again if the test fails
+4. Checks the domain resolves to this server before spending a Let's Encrypt attempt (rate-limited to 5 failures/hostname/hour)
+5. Requests the certificate with `--redirect --keep-until-expiring`, then enables HTTP/2 and confirms `certbot.timer` is armed
+6. Sets `proxy_mode = True` in the Odoo config, restarting the service if it is already running
 
 ## wkhtmltopdf Auto-Detection
 

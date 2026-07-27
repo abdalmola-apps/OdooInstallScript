@@ -50,6 +50,17 @@ generate_password() {
     openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c "$len"
 }
 
+# apt wrapper — waits for the dpkg lock instead of dying (unattended-upgrades
+# holds it for minutes on a freshly booted server) and never opens a prompt.
+# DPkg::Lock::Timeout needs apt >= 1.9.11, i.e. Ubuntu 20.04+.
+# `sudo env` rather than `sudo VAR=…` so env_reset in sudoers can't strip them.
+apt_get() {
+    sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+        apt-get -o DPkg::Lock::Timeout=600 \
+                -o Dpkg::Options::=--force-confold \
+                -o Dpkg::Options::=--force-confdef "$@"
+}
+
 # --- Validators ---
 
 validate_username() {
@@ -139,6 +150,13 @@ echo "╔═══════════════════════�
 echo "║         Odoo Production Installation Script v${SCRIPT_VERSION}       ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
+
+# Fail here rather than 10 minutes in, and cache the sudo timestamp so the
+# unattended part of the run never stops to ask for a password.
+if ! sudo -v; then
+    log_error "This script needs sudo privileges."
+    exit 1
+fi
 
 # --- Username ---
 while true; do
@@ -284,8 +302,37 @@ OE_SERVICE="${OE_USER}-odoo.service"
 OE_DATA_DIR="$OE_HOME/data"
 OE_CUSTOM_ADDONS_DIR="$OE_HOME/custom-addons"
 OE_LONGPOLLING_PORT=$((OE_PORT + 1))
-ADMIN_PASSWD="$(generate_password 24)"
 CHECKPOINT_FILE="/tmp/odoo_setup_checkpoint_${OE_USER}"
+
+# Odoo 16 renamed longpolling_port -> gevent_port. Writing the wrong key means
+# Odoo keeps its default 8072 while Nginx proxies /websocket to OE_PORT+1 —
+# websockets silently break.
+if [ "${OE_VERSION%%.*}" -ge 16 ]; then
+    GEVENT_KEY="gevent_port"
+else
+    GEVENT_KEY="longpolling_port"
+fi
+
+# Reuse the existing password on a resumed or repeat run, otherwise the final
+# summary prints a password that is not the one in the config file.
+if [ -f "$OE_HOME/$OE_CONFIG" ] && sudo grep -q '^admin_passwd' "$OE_HOME/$OE_CONFIG"; then
+    ADMIN_PASSWD="$(sudo awk -F'[ =]+' '/^admin_passwd/{print $2; exit}' "$OE_HOME/$OE_CONFIG")"
+    log_warn "Existing config found — reusing its admin password."
+else
+    ADMIN_PASSWD="$(generate_password 24)"
+fi
+
+# Addons path is built here, not inside step 10: a run that dies during step 11
+# resumes with checkpoint=10, which skips step 10 and would leave this unset —
+# `set -u` then kills the resumed run.
+ADDONS_PATH="$OE_HOME_EXT/addons"
+if [ ${#VALID_ADDON_URLS[@]} -gt 0 ]; then
+    for url in "${VALID_ADDON_URLS[@]}"; do
+        ADDONS_PATH="$ADDONS_PATH,$OE_CUSTOM_ADDONS_DIR/$(basename "$url" .git)"
+    done
+else
+    ADDONS_PATH="$ADDONS_PATH,$OE_CUSTOM_ADDONS_DIR"
+fi
 
 LAST_CHECKPOINT=$(get_last_checkpoint)
 CURRENT_STEP=0
@@ -354,8 +401,8 @@ log_info "Starting installation..."
 if step 1 "Check & Install PostgreSQL"; then
     if ! command -v psql &> /dev/null; then
         log_info "PostgreSQL not found. Installing..."
-        sudo apt-get update -qq
-        sudo apt-get install -y postgresql postgresql-contrib
+        apt_get update -qq
+        apt_get install -y postgresql postgresql-contrib
     else
         log_success "PostgreSQL is already installed."
     fi
@@ -422,16 +469,15 @@ fi
 
 # Step 5: System Dependencies & wkhtmltopdf
 if step 5 "Install System Dependencies & wkhtmltopdf"; then
-    log_info "Updating package lists..."
-    sudo apt-get update -qq
+    log_info "Updating package lists (waits for the dpkg lock if held)..."
+    apt_get update -qq
 
     log_info "Installing system dependencies..."
-    sudo apt-get install -y \
+    apt_get install -y \
         git python3-cffi build-essential wget curl \
         python3-dev python3-venv python3-wheel python3-setuptools \
         libxslt-dev libzip-dev libldap2-dev libsasl2-dev \
-        libpng-dev libjpeg-dev libpq-dev \
-        gdebi-core
+        libpng-dev libjpeg-dev libpq-dev
 
     # Auto-detect wkhtmltopdf for current Ubuntu codename + architecture
     CODENAME="$(get_ubuntu_codename)"
@@ -454,7 +500,7 @@ if step 5 "Install System Dependencies & wkhtmltopdf"; then
         log_info "Downloading wkhtmltopdf for ${CODENAME}/${ARCH}..."
         WKHTMLTOPDF_DEB="/tmp/wkhtmltox_${WKHTMLTOPDF_VERSION}.deb"
         wget -q "$WKHTMLTOPDF_URL" -O "$WKHTMLTOPDF_DEB"
-        sudo apt install -y "$WKHTMLTOPDF_DEB"
+        apt_get install -y "$WKHTMLTOPDF_DEB"
         rm -f "$WKHTMLTOPDF_DEB"
         log_success "wkhtmltopdf installed."
     fi
@@ -493,7 +539,7 @@ fi
 # Step 7: Node.js — LESS & rtlcss
 if step 7 "Install LESS & rtlcss"; then
     log_info "Installing Node.js and npm..."
-    sudo apt-get install -y nodejs npm
+    apt_get install -y nodejs npm
 
     log_info "Installing LESS and rtlcss globally..."
     sudo npm install -g less less-plugin-clean-css rtlcss
@@ -536,31 +582,25 @@ fi
 
 # Step 10: Clone Custom Addon Repos
 if step 10 "Clone Custom Addon Repos"; then
-    # Build addons path starting with Odoo core addons
-    ADDONS_PATH="$OE_HOME_EXT/addons"
+    for url in "${VALID_ADDON_URLS[@]:-}"; do
+        [ -z "$url" ] && continue
+        REPO_PATH="$OE_CUSTOM_ADDONS_DIR/$(basename "$url" .git)"
 
-    if [ ${#VALID_ADDON_URLS[@]} -gt 0 ]; then
-        for url in "${VALID_ADDON_URLS[@]}"; do
-            REPO_NAME="$(basename "$url" .git)"
-            REPO_PATH="$OE_CUSTOM_ADDONS_DIR/$REPO_NAME"
+        if [ -d "$REPO_PATH" ]; then
+            log_success "Addon repo '$(basename "$REPO_PATH")' already exists. Skipping."
+            continue
+        fi
 
-            if [ -d "$REPO_PATH" ]; then
-                log_success "Addon repo '$REPO_NAME' already exists. Skipping."
-            else
-                log_info "Cloning addon repo: $url ..."
-                sudo -u "$OE_USER" git clone "$url" "$REPO_PATH" || {
-                    log_warn "Failed to clone $url — trying with sudo..."
-                    sudo git clone "$url" "$REPO_PATH"
-                    sudo chown -R "$OE_USER:$OE_USER" "$REPO_PATH"
-                }
-            fi
-
-            ADDONS_PATH="$ADDONS_PATH,$REPO_PATH"
-        done
-    else
-        # Add the custom-addons directory even if no repos were cloned
-        ADDONS_PATH="$ADDONS_PATH,$OE_CUSTOM_ADDONS_DIR"
-    fi
+        log_info "Cloning addon repo: $url ..."
+        # -H so git finds the key generated in step 9; accept-new so an unknown
+        # host key does not hang the run waiting on a yes/no prompt.
+        sudo -u "$OE_USER" -H env GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
+            git clone "$url" "$REPO_PATH" || {
+            log_warn "Failed to clone $url — trying with sudo..."
+            sudo git clone "$url" "$REPO_PATH"
+            sudo chown -R "$OE_USER:$OE_USER" "$REPO_PATH"
+        }
+    done
 
     log_success "Addon repos configured. Addons path: $ADDONS_PATH"
     save_checkpoint 10
@@ -581,7 +621,7 @@ db_port = False
 db_user = $OE_USER
 db_password = False
 http_port = $OE_PORT
-longpolling_port = $OE_LONGPOLLING_PORT
+$GEVENT_KEY = $OE_LONGPOLLING_PORT
 
 addons_path = $ADDONS_PATH
 data_dir = $OE_DATA_DIR
@@ -709,9 +749,13 @@ fi
 # Step 16: UFW Firewall
 if step 16 "Configure UFW Firewall"; then
     log_info "Configuring UFW firewall..."
-    sudo apt-get install -y ufw
+    apt_get install -y ufw
 
-    sudo ufw allow OpenSSH
+    # Allow the port sshd actually listens on — hardcoding 22 locks you out of
+    # any server running SSH elsewhere, and the OpenSSH profile only covers 22.
+    SSH_PORT="$(sudo sshd -T 2>/dev/null | awk '/^port /{print $2; exit}' || true)"
+    log_info "Allowing SSH on port ${SSH_PORT:-22}."
+    sudo ufw allow "${SSH_PORT:-22}/tcp"
     sudo ufw allow 80/tcp
     sudo ufw allow 443/tcp
 
