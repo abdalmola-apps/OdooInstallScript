@@ -30,6 +30,31 @@ readonly SCRIPT_VERSION="2.2.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 
+# Companion scripts sit next to this one in a git checkout, and land on PATH as
+# odoo-nginx / odoo-backup after `sudo make install`. Prints the resolved path,
+# returns 1 if neither exists.
+find_companion() {
+    local file="$1" cmd="$2"
+    if [ -f "$SCRIPT_DIR/$file" ]; then
+        printf '%s\n' "$SCRIPT_DIR/$file"
+    else
+        command -v "$cmd" 2>/dev/null || return 1
+    fi
+}
+
+# Same idea, prefix-relative: <prefix>/bin/odoo-install finds
+# <prefix>/share/odoo-install/requirements.txt, under any PREFIX or DESTDIR.
+find_data_file() {
+    local file="$1" c
+    for c in "$SCRIPT_DIR/$file" "$SCRIPT_DIR/../share/odoo-install/$file"; do
+        if [ -f "$c" ]; then
+            printf '%s\n' "$c"
+            return 0
+        fi
+    done
+    return 1
+}
+
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
@@ -847,16 +872,16 @@ DB_MAXCONN=$(( WORKERS * 2 + 4 ))
 # mistake to make, and the alternative is discovering it after fourteen steps
 # of system changes have already been applied.
 MISSING_SCRIPTS=()
-if [ "$INSTALL_NGINX" = "yes" ] && [ ! -f "$SCRIPT_DIR/odoo_nginx.sh" ]; then
+if [ "$INSTALL_NGINX" = "yes" ] && ! find_companion odoo_nginx.sh odoo-nginx >/dev/null; then
     MISSING_SCRIPTS+=("odoo_nginx.sh — required for the Nginx + SSL step")
 fi
-if [ "$SETUP_BACKUP" = "yes" ] && [ ! -f "$SCRIPT_DIR/odoo_backup.sh" ]; then
+if [ "$SETUP_BACKUP" = "yes" ] && ! find_companion odoo_backup.sh odoo-backup >/dev/null; then
     MISSING_SCRIPTS+=("odoo_backup.sh — required for automated backups")
 fi
 
 if [ ${#MISSING_SCRIPTS[@]} -gt 0 ]; then
     echo ""
-    log_error "Missing companion script(s) in $SCRIPT_DIR:"
+    log_error "Missing companion script(s) — not in $SCRIPT_DIR, not on PATH:"
     for m in "${MISSING_SCRIPTS[@]}"; do
         log_error "  - $m"
     done
@@ -1079,11 +1104,11 @@ if step 6 "Create Virtual Environment & Install Python Dependencies"; then
     sudo -u "$OE_USER" "$OE_HOME_EXT/venv/bin/pip" install --no-cache-dir \
         num2words ofxparse dbfread ebaysdk firebase_admin pyOpenSSL
 
-    # Install additional requirements from script directory if present
-    if [ -f "$SCRIPT_DIR/requirements.txt" ]; then
-        log_info "Installing extra requirements from $SCRIPT_DIR/requirements.txt..."
+    # Extra requirements, from the checkout or from <prefix>/share/odoo-install
+    if REQUIREMENTS_FILE="$(find_data_file requirements.txt)"; then
+        log_info "Installing extra requirements from $REQUIREMENTS_FILE..."
         sudo -u "$OE_USER" "$OE_HOME_EXT/venv/bin/pip" install --no-cache-dir \
-            -r "$SCRIPT_DIR/requirements.txt"
+            -r "$REQUIREMENTS_FILE"
     fi
 
     log_success "Python dependencies installed."
@@ -1277,11 +1302,9 @@ fi
 # Step 15: Nginx + Let's Encrypt SSL (conditional — delegates to odoo_nginx.sh)
 if step 15 "Configure Nginx & SSL"; then
     if [ "$INSTALL_NGINX" = "yes" ]; then
-        NGINX_SCRIPT="$SCRIPT_DIR/odoo_nginx.sh"
-
-        if [ ! -f "$NGINX_SCRIPT" ]; then
-            log_error "odoo_nginx.sh not found at $NGINX_SCRIPT"
-            log_error "Ensure odoo_nginx.sh is in the same directory as this script."
+        if ! NGINX_SCRIPT="$(find_companion odoo_nginx.sh odoo-nginx)"; then
+            log_error "odoo_nginx.sh not found next to this script, and odoo-nginx"
+            log_error "is not on PATH. Keep the scripts together, or run 'sudo make install'."
             exit 1
         fi
 
@@ -1396,11 +1419,9 @@ fi
 # Step 19: Automated Backups (conditional — delegates to odoo_backup.sh)
 if step 19 "Set Up Automated Backups"; then
     if [ "$SETUP_BACKUP" = "yes" ]; then
-        BACKUP_SCRIPT="$SCRIPT_DIR/odoo_backup.sh"
-
-        if [ ! -f "$BACKUP_SCRIPT" ]; then
-            log_error "odoo_backup.sh not found at $BACKUP_SCRIPT"
-            log_error "Ensure odoo_backup.sh is in the same directory as this script."
+        if ! BACKUP_SCRIPT="$(find_companion odoo_backup.sh odoo-backup)"; then
+            log_error "odoo_backup.sh not found next to this script, and odoo-backup"
+            log_error "is not on PATH. Keep the scripts together, or run 'sudo make install'."
             log_warn "Skipping backup cron setup. You can set it up manually later."
             SETUP_BACKUP="no"
         fi

@@ -22,7 +22,9 @@ sudo ./odoo_backup.sh -u <user> [-d <dir>] [-r 30] [-f] [-q]
 
 ## Architecture
 
-**`odoo_install.sh` is the orchestrator.** It resolves `SCRIPT_DIR` from `BASH_SOURCE` and shells out to `odoo_nginx.sh` (step 15) and `odoo_backup.sh` (step 19, copied to `$OE_HOME/` and cron'd). All three files must stay co-located; the installer hard-fails on a missing `odoo_nginx.sh` and warn-skips a missing `odoo_backup.sh`.
+**`odoo_install.sh` is the orchestrator.** It resolves `SCRIPT_DIR` from `BASH_SOURCE` and shells out to `odoo_nginx.sh` (step 15) and `odoo_backup.sh` (step 19, copied to `$OE_HOME/` and cron'd). The installer hard-fails on a missing `odoo_nginx.sh` and warn-skips a missing `odoo_backup.sh`.
+
+**Two supported layouts, one resolver.** `find_companion <file> <command>` checks `$SCRIPT_DIR/<file>` (git checkout) then `command -v <command>` (installed via `make install` as `odoo-nginx` / `odoo-backup`); `find_data_file` does the same for `requirements.txt`, falling back to `$SCRIPT_DIR/../share/odoo-install/` so it stays correct under any `PREFIX` or `DESTDIR`. Both print the resolved path and return 1 when nothing matches — every call site goes through them, so never reintroduce a bare `$SCRIPT_DIR/odoo_*.sh` test. The `Makefile` renames on install (`odoo_install.sh` → `odoo-install`), which is exactly why the lookup cannot key on filename alone.
 
 **`$OE_USER` is the single namespace key.** Everything derives from it: `/home/$OE_USER`, `${OE_USER}-odoo.conf`, `${OE_USER}-odoo.service`, the PostgreSQL role, `/etc/logrotate.d/${OE_USER}-odoo`, nginx log names, `/tmp/odoo_setup_checkpoint_${OE_USER}`. Multi-instance support is entirely this convention — don't introduce a fixed path or name anywhere.
 

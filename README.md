@@ -36,6 +36,39 @@ sudo ./odoo_install.sh
 
 Then answer the prompts. Nothing is changed on the system until you confirm the summary.
 
+### Install as a system command
+
+If you deploy more than one server, put the three scripts on `PATH` once:
+
+```bash
+sudo make install
+```
+
+| Becomes | From |
+|---------|------|
+| `odoo-install` | `odoo_install.sh` |
+| `odoo-nginx` | `odoo_nginx.sh` |
+| `odoo-backup` | `odoo_backup.sh` |
+
+They go in `/usr/local/bin`, with `requirements.txt` in `/usr/local/share/odoo-install/`. From then on, from any directory:
+
+```bash
+sudo odoo-install
+sudo odoo-install -u odoo18 -y
+sudo odoo-nginx -u odoo18 -d erp.mycompany.com -e admin@mycompany.com
+sudo odoo-backup -u odoo18 -f
+```
+
+`odoo-install` finds its companions on `PATH`, so the repository no longer has to be present — or even checked out — after installing.
+
+```bash
+sudo make install PREFIX=/usr    # somewhere else
+sudo make uninstall              # remove all four files
+make check                       # shellcheck + bash -n
+```
+
+Running the scripts straight out of the checkout keeps working exactly as before; installing is optional.
+
 ### Express install
 
 One command, no questions:
@@ -56,7 +89,7 @@ Odoo 18.0 on the first free port from 8069, no Nginx, swap if RAM is under 4 GB,
 
 For an unattended install *with* Nginx or custom addons, pre-write the answers file — see [Unattended installs](#unattended-installs).
 
-> **Clone the repository — do not download `odoo_install.sh` on its own.** The installer delegates the Nginx and backup steps to the other two scripts and expects them in the same directory. If you ask for a feature whose script is missing, it stops before making any changes and tells you.
+> **Clone the repository — do not download `odoo_install.sh` on its own.** The installer delegates the Nginx and backup steps to the other two scripts, and looks for them in its own directory first, then on `PATH` as `odoo-nginx` / `odoo-backup`. If you ask for a feature whose script is missing from both, it stops before making any changes and tells you.
 
 ## Which files do I need?
 
