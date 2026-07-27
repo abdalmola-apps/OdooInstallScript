@@ -708,9 +708,9 @@ fi # end of the prompt block skipped when reusing saved answers
 # Encrypt rate-limits failed validations to 5 per hostname per hour — so two
 # careless retries cost an hour. Catching it here also means a fresh run, not a
 # half-installed one, when the fix is "add an A record and wait 5 minutes".
-if [ "$INSTALL_NGINX" = "yes" ]; then
-    PUBLIC_IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
-fi
+# Unconditional: the DNS gate needs it, and so does the final summary, which
+# otherwise prints a literal "<server-ip>" placeholder for a no-Nginx install.
+PUBLIC_IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
 
 while [ "$INSTALL_NGINX" = "yes" ]; do
     check_domain_dns "$OE_DOMAIN" && dns_rc=0 || dns_rc=$?
@@ -1368,7 +1368,28 @@ if step 18 "Start Odoo Service"; then
     sudo systemctl daemon-reload
     sudo systemctl enable "$OE_SERVICE"
     sudo systemctl start "$OE_SERVICE"
-    log_success "Odoo service started and enabled."
+
+    # `systemctl start` returns as soon as the process is forked, so it exits 0
+    # for an Odoo that dies a second later on a bad config or a busy port. Wait
+    # for the port to actually accept — otherwise the only symptom is "site
+    # can't be reached" long after the installer claimed success.
+    # Socket check only — port_in_use() also counts a config-file claim, and
+    # step 11 just wrote a config claiming this port, so it would always pass.
+    odoo_listening() { ss -Hltn "sport = :$OE_PORT" 2>/dev/null | grep -q .; }
+
+    for _ in $(seq 1 60); do
+        odoo_listening && break
+        sleep 1
+    done
+
+    if odoo_listening; then
+        log_success "Odoo service started and enabled, listening on port $OE_PORT."
+    else
+        log_error "Odoo is NOT listening on port $OE_PORT after 60s."
+        log_error "The rest of the install will continue, but the site will not load."
+        log_error "  sudo systemctl status $OE_SERVICE --no-pager"
+        log_error "  sudo tail -50 $OE_DATA_DIR/odoo-server.log"
+    fi
     save_checkpoint 18
 fi
 
@@ -1488,11 +1509,15 @@ fi
 # Section 10: Final Summary
 # ==============================================================================
 
-# Build access URL
-if [ "$INSTALL_NGINX" = "yes" ]; then
+# Build access URL. Nginx being installed does not mean SSL succeeded — certbot
+# fails whenever DNS is not pointing here yet — and printing https:// when
+# nothing listens on 443 is exactly the "site can't be reached" the user gets.
+if [ "$INSTALL_NGINX" = "yes" ] && sudo test -d "/etc/letsencrypt/live/$OE_DOMAIN"; then
     ACCESS_URL="https://$OE_DOMAIN"
+elif [ "$INSTALL_NGINX" = "yes" ]; then
+    ACCESS_URL="http://$OE_DOMAIN  (no certificate — see below)"
 else
-    ACCESS_URL="http://<server-ip>:$OE_PORT"
+    ACCESS_URL="http://${PUBLIC_IP:-<server-ip>}:$OE_PORT"
 fi
 
 echo ""
@@ -1502,6 +1527,11 @@ echo -e "${GREEN}╠════════════════════
 echo -e "${GREEN}║${NC} Odoo User:       ${BLUE}$OE_USER${NC}"
 echo -e "${GREEN}║${NC} Odoo Version:    ${BLUE}$OE_VERSION${NC}"
 echo -e "${GREEN}║${NC} Access URL:      ${BLUE}$ACCESS_URL${NC}"
+if [ "$INSTALL_NGINX" = "yes" ] && ! sudo test -d "/etc/letsencrypt/live/$OE_DOMAIN"; then
+echo -e "${GREEN}║${NC}   ${YELLOW}Certbot did not issue a certificate — port 443 is closed.${NC}"
+echo -e "${GREEN}║${NC}   Point $OE_DOMAIN at ${PUBLIC_IP:-this server}, then run:"
+echo -e "${GREEN}║${NC}   ${YELLOW}sudo certbot --nginx -d $OE_DOMAIN -m $CERTBOT_EMAIL --redirect${NC}"
+fi
 echo -e "${GREEN}║${NC}"
 echo -e "${GREEN}║${NC} Master Password: ${RED}$ADMIN_PASSWD${NC}"
 echo -e "${GREEN}║${NC}   (database management only — not a login)"
