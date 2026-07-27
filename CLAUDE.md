@@ -32,6 +32,10 @@ sudo ./odoo_backup.sh -u <user> [-d <dir>] [-r 30] [-f] [-q]
 
 State lives in `/var/lib/odoo-install/<user>.{checkpoint,answers}`, root-owned in a 700 directory — not `/tmp`, because the answers file is `source`d as root and a world-writable location would be a local privilege escalation. A pre-2.2 `/tmp/odoo_setup_checkpoint_<user>` is migrated on sight.
 
+**Ports are auto-selected, not fixed.** `find_free_port` returns the lowest pair where both `p` and `p+1` are free; `port_in_use` checks listening sockets *and* `/home/*/*-odoo.conf` claims, because a stopped instance still owns its port. The config grep needs `sudo` — instance configs are `chmod 640` owned by their own user. Typed ports go through the same check.
+
+**Three input paths, not two:** `REUSE_ANSWERS` (saved answers), `EXPRESS` (`-y`, all defaults, skips the confirmation), and the interactive prompts. They are branches of one `if/elif/else`; a new prompt needs a default in the express branch and an entry in `save_answers()`, or it silently reverts.
+
 **The prompt block is wrapped in `if [ "$REUSE_ANSWERS" = "yes" ] … else … fi`,** closed by a lone `fi` marked with a comment. Anything a *reused* run also needs (currently `RAM_MB` and the `VALID_ADDON_URLS` parsing) must sit after that `fi`, not inside the prompt branch — the answers file stores the raw `CUSTOM_ADDONS_INPUT` string, not the parsed array. Adding a prompt means adding the variable to `save_answers()` too, or it silently reverts to its default on resume.
 
 **Config-file contract between scripts.** `odoo_install.sh` step 11 writes `$OE_HOME/${OE_USER}-odoo.conf` including a literal `; Security` comment line; `odoo_nginx.sh` step 5 patches `proxy_mode` by looking for `^proxy_mode`, falling back to inserting after `^; Security`. Changing that comment or the key's default breaks the standalone nginx path silently.

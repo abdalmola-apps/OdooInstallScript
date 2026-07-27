@@ -36,6 +36,26 @@ sudo ./odoo_install.sh
 
 Then answer the prompts. Nothing is changed on the system until you confirm the summary.
 
+### Express install
+
+One command, no questions:
+
+```bash
+sudo ./odoo_install.sh -u odoo18 -y
+```
+
+Odoo 18.0 on the first free port from 8069, no Nginx, swap if RAM is under 4 GB, and daily backups at 02:00 with a 30-day retention. Good for a throwaway or a second instance; use the interactive run when you want Nginx and SSL.
+
+### Options
+
+| Flag | Meaning |
+|------|---------|
+| `-u <username>` | Odoo system user. Prompted for if omitted. |
+| `-y` | Accept every default and skip the confirmation. Requires `-u`. |
+| `-h` | Help. |
+
+For an unattended install *with* Nginx or custom addons, pre-write the answers file — see [Unattended installs](#unattended-installs).
+
 > **Clone the repository — do not download `odoo_install.sh` on its own.** The installer delegates the Nginx and backup steps to the other two scripts and expects them in the same directory. If you ask for a feature whose script is missing, it stops before making any changes and tells you.
 
 ## Which files do I need?
@@ -62,8 +82,8 @@ The script prompts for the following (with validation and defaults):
 | Prompt | Default | Validation |
 |--------|---------|------------|
 | System username | *(required)* | Alphanumeric + underscore |
-| Odoo version | `18.0` | Format: `XX.0` |
-| HTTP port | `8069` | Range: 1024-65535 |
+| Odoo version | `18.0` | Pick from a menu of the current release branches, or type any version — checked against `odoo/odoo` before the install starts |
+| HTTP port | *first free pair from `8069`* | Range 1024-65535, and both the port and the one above it must be free |
 | Install Nginx? | `no` | yes/no |
 | Domain name | *(required if Nginx)* | Valid FQDN |
 | Certbot email | *(required if Nginx)* | Valid email |
@@ -80,7 +100,13 @@ A confirmation summary is displayed before any changes are made.
 
 ```
 Enter the Odoo system username: odoo18
-Enter the Odoo version [18.0]: 18.0
+Available Odoo versions:
+  1) 19.0
+  2) 18.0   (default)
+  3) 17.0
+  4) 16.0
+
+Select a number, or type any version [18.0]: 2
 Enter the Odoo HTTP port [8069]: 8069
 Install Nginx as reverse proxy? (yes/no) [no]: yes
 Enter the domain name (e.g., odoo.example.com): erp.mycompany.com
@@ -438,9 +464,26 @@ When enabled, the script creates a swap file:
 - **Persistence**: Added to `/etc/fstab`
 - **Auto-suggest**: Recommended when RAM < 4GB
 
+## Version Selection
+
+The menu is built at runtime from the branches that exist in `github.com/odoo/odoo`, so it stays correct as Odoo releases rather than drifting against a hardcoded list. Type a number to pick one, or type any version directly — `14.0` and older still work, they are just not listed.
+
+Whatever you choose is checked against the remote before the install begins. A typo used to survive validation (`23.0` matches the `XX.0` format) and only failed at step 4, after the user and database had already been created. If GitHub is unreachable the script falls back to a built-in list and skips the remote check.
+
+## Port Selection
+
+Odoo needs two consecutive ports — HTTP, and the websocket port directly above it. The installer offers the lowest free pair starting at `8069`, and rejects a port you type in if either half is taken.
+
+A port counts as taken when:
+
+- something is listening on it (`ss`), **or**
+- another instance's config claims it — checked across `/home/*/*-odoo.conf`
+
+The second test is the one that matters for multi-instance servers: a *stopped* instance still owns its port, and it would collide the moment both were running. Nothing checked this before, and a collision surfaced only as a service that refused to start after the installer had already reported success.
+
 ## Multiple Instances
 
-Run the script again with a different username and port. Each instance gets its own:
+Run the script again with a different username. The port is picked for you. Each instance gets its own:
 - System user and PostgreSQL user
 - Odoo installation and venv
 - Configuration and service files

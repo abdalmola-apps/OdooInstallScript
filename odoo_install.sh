@@ -79,6 +79,57 @@ validate_git_url() {
     [[ "$1" =~ ^https://.*\.git$ ]] || [[ "$1" =~ ^git@.*\.git$ ]] || [[ "$1" =~ ^https://.+ ]]
 }
 
+# --- Odoo Versions ---
+
+readonly ODOO_REPO="https://github.com/odoo/odoo"
+
+# The newest release branches, most recent first. Empty output means the repo
+# was unreachable — callers fall back to a built-in list.
+list_odoo_versions() {
+    git ls-remote --heads "$ODOO_REPO" 2>/dev/null \
+        | grep -oE 'refs/heads/[0-9]+\.0$' \
+        | sed 's|refs/heads/||' \
+        | sort -Vr \
+        | head -4
+}
+
+odoo_branch_exists() {
+    git ls-remote --heads --exit-code "$ODOO_REPO" "refs/heads/$1" >/dev/null 2>&1
+}
+
+# --- Port Selection ---
+
+# A port counts as taken if something is listening on it, or if another
+# instance's config claims it. The config check matters: a stopped instance
+# still owns its port, and it would collide the moment both are running.
+port_in_use() {
+    local p="$1"
+    if ss -Hltn "sport = :$p" 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    # sudo because instance configs are chmod 640 and owned by their own user.
+    if sudo grep -rqsE "^[[:space:]]*(http_port|xmlrpc_port|gevent_port|longpolling_port)[[:space:]]*=[[:space:]]*${p}[[:space:]]*$" /home/*/*-odoo.conf; then
+        return 0
+    fi
+    return 1
+}
+
+# Odoo needs a pair — the HTTP port and the websocket port directly above it —
+# so both halves have to be free. Steps by one rather than two: since each
+# candidate is checked on both halves anyway, this finds the lowest free pair
+# instead of skipping over usable ones.
+find_free_port() {
+    local p="${1:-8069}"
+    while [ "$p" -lt 65535 ]; do
+        if ! port_in_use "$p" && ! port_in_use "$((p + 1))"; then
+            echo "$p"
+            return 0
+        fi
+        p=$((p + 1))
+    done
+    return 1
+}
+
 # --- System Info ---
 
 get_ubuntu_codename() {
@@ -163,7 +214,57 @@ cleanup() {
 trap cleanup ERR INT TERM
 
 # ==============================================================================
-# Section 3: Input Collection & Validation
+# Section 3: Arguments
+# ==============================================================================
+
+usage() {
+    cat <<EOF
+Odoo Production Installation Script v${SCRIPT_VERSION}
+
+Usage: sudo $0 [-u <username>] [-y] [-h]
+
+Options:
+  -u <username>   Odoo system user. Prompted for if omitted.
+  -y              Express install: accept every default without asking and
+                  skip the confirmation. Needs -u.
+  -h              Show this help.
+
+Express defaults: Odoo 18.0, first free port pair from 8069, no Nginx,
+no custom addons, swap if RAM < 4GB, daily backups at 02:00 with filestore
+and 30-day retention.
+
+  # interactive
+  sudo $0
+
+  # one command, no questions
+  sudo $0 -u odoo18 -y
+
+For an unattended install with Nginx or custom addons, pre-write the answers
+file instead — see "Unattended installs" in the README.
+EOF
+    exit 0
+}
+
+EXPRESS="no"
+CLI_USER=""
+
+while getopts ":u:yh" opt; do
+    case "$opt" in
+        u) CLI_USER="$OPTARG" ;;
+        y) EXPRESS="yes" ;;
+        h) usage ;;
+        :) log_error "Option -$OPTARG requires an argument."; exit 1 ;;
+        *) log_error "Unknown option: -$OPTARG"; usage ;;
+    esac
+done
+
+if [ "$EXPRESS" = "yes" ] && [ -z "$CLI_USER" ]; then
+    log_error "-y needs a username: $0 -u <username> -y"
+    exit 1
+fi
+
+# ==============================================================================
+# Section 3b: Input Collection & Validation
 # ==============================================================================
 
 echo -e "${BLUE}"
@@ -180,16 +281,25 @@ if ! sudo -v; then
 fi
 
 # --- Username ---
-while true; do
-    read -rp "Enter the Odoo system username: " OE_USER
-    if [ -z "$OE_USER" ]; then
-        log_error "Username cannot be empty."
-    elif ! validate_username "$OE_USER"; then
-        log_error "Invalid username. Use only letters, digits, and underscores (must start with letter or underscore)."
-    else
-        break
+if [ -n "$CLI_USER" ]; then
+    if ! validate_username "$CLI_USER"; then
+        log_error "Invalid username '$CLI_USER'. Letters, digits and underscores only."
+        exit 1
     fi
-done
+    OE_USER="$CLI_USER"
+    log_info "Username: $OE_USER"
+else
+    while true; do
+        read -rp "Enter the Odoo system username: " OE_USER
+        if [ -z "$OE_USER" ]; then
+            log_error "Username cannot be empty."
+        elif ! validate_username "$OE_USER"; then
+            log_error "Invalid username. Use only letters, digits, and underscores (must start with letter or underscore)."
+        else
+            break
+        fi
+    done
+fi
 
 # --- Resume state ---
 # Keyed on the username, so it has to come after that prompt. Root-only, and
@@ -213,34 +323,107 @@ fi
 REUSE_ANSWERS="no"
 if sudo test -f "$ANSWERS_FILE"; then
     log_info "A previous run for '$OE_USER' stopped after step $(get_last_checkpoint) of 19."
-    read -rp "Reuse its answers and skip the questions? (yes/no) [yes]: " REUSE_ANSWERS
-    REUSE_ANSWERS="${REUSE_ANSWERS:-yes}"
-    REUSE_ANSWERS="${REUSE_ANSWERS,,}"
+    if [ "$EXPRESS" = "yes" ]; then
+        REUSE_ANSWERS="yes"
+        log_info "Express mode — reusing the saved answers."
+    else
+        read -rp "Reuse its answers and skip the questions? (yes/no) [yes]: " REUSE_ANSWERS
+        REUSE_ANSWERS="${REUSE_ANSWERS:-yes}"
+        REUSE_ANSWERS="${REUSE_ANSWERS,,}"
+    fi
 fi
 
 if [ "$REUSE_ANSWERS" = "yes" ]; then
     # shellcheck disable=SC1090  # generated by save_answers, root-owned 600
     . <(sudo cat "$ANSWERS_FILE")
     log_success "Loaded saved answers. Review the summary below before confirming."
+
+elif [ "$EXPRESS" = "yes" ]; then
+    OE_VERSION="18.0"
+    OE_PORT="$(find_free_port 8069 || echo 8069)"
+    INSTALL_NGINX="no"
+    OE_DOMAIN=""
+    CERTBOT_EMAIL=""
+    CUSTOM_ADDONS_INPUT=""
+    SETUP_SWAP="no"
+    if [ "$(get_total_ram_mb)" -lt 4096 ]; then
+        SETUP_SWAP="yes"
+    fi
+    SETUP_BACKUP="yes"
+    BACKUP_FILESTORE="yes"
+    BACKUP_RETENTION=30
+    BACKUP_HOUR="02:00"
+    log_success "Express mode: Odoo $OE_VERSION on port $OE_PORT, no Nginx, daily backups at $BACKUP_HOUR."
+
 else
 
 # --- Version ---
-while true; do
-    read -rp "Enter the Odoo version [18.0]: " OE_VERSION
-    OE_VERSION="${OE_VERSION:-18.0}"
-    if ! validate_version "$OE_VERSION"; then
-        log_error "Invalid version format. Expected format: XX.0 (e.g., 18.0, 17.0)"
+# Built from the branches that actually exist in odoo/odoo, so the menu cannot
+# go stale as Odoo releases, and a typo is caught here instead of at step 4
+# after three steps of system changes.
+DEFAULT_VERSION="18.0"
+NETWORK_OK="yes"
+mapfile -t ODOO_VERSIONS < <(list_odoo_versions)
+
+if [ ${#ODOO_VERSIONS[@]} -eq 0 ]; then
+    NETWORK_OK="no"
+    ODOO_VERSIONS=("19.0" "18.0" "17.0" "16.0")
+    log_warn "Could not reach github.com — falling back to a built-in version list."
+fi
+
+echo ""
+echo "Available Odoo versions:"
+for i in "${!ODOO_VERSIONS[@]}"; do
+    if [ "${ODOO_VERSIONS[$i]}" = "$DEFAULT_VERSION" ]; then
+        printf "  %d) %s   (default)\n" "$((i + 1))" "${ODOO_VERSIONS[$i]}"
     else
+        printf "  %d) %s\n" "$((i + 1))" "${ODOO_VERSIONS[$i]}"
+    fi
+done
+echo ""
+
+while true; do
+    read -rp "Select a number, or type any version [$DEFAULT_VERSION]: " VERSION_CHOICE
+    VERSION_CHOICE="${VERSION_CHOICE:-$DEFAULT_VERSION}"
+
+    # A bare number picks from the menu; anything else is taken literally, so
+    # versions older than the four listed are still reachable.
+    if [[ "$VERSION_CHOICE" =~ ^[0-9]+$ ]] && [ "$VERSION_CHOICE" -ge 1 ] \
+       && [ "$VERSION_CHOICE" -le "${#ODOO_VERSIONS[@]}" ]; then
+        OE_VERSION="${ODOO_VERSIONS[$((VERSION_CHOICE - 1))]}"
+    else
+        OE_VERSION="$VERSION_CHOICE"
+    fi
+
+    if ! validate_version "$OE_VERSION"; then
+        log_error "Invalid version format. Expected XX.0 (e.g. 18.0), or a number from the list."
+    elif [ "$NETWORK_OK" = "yes" ] && ! odoo_branch_exists "$OE_VERSION"; then
+        log_error "No branch '$OE_VERSION' in github.com/odoo/odoo."
+    else
+        log_info "Odoo version: $OE_VERSION"
         break
     fi
 done
 
 # --- Port ---
+# Default to the first free pair rather than a fixed 8069, so a second instance
+# on the same server just works. Entered ports are checked too — nothing
+# validated this before, and a collision only surfaced as a service that
+# refused to start after the install had reported success.
+DEFAULT_PORT="$(find_free_port 8069 || echo 8069)"
+if [ "$DEFAULT_PORT" != "8069" ]; then
+    log_info "Port 8069 is already taken — suggesting $DEFAULT_PORT instead."
+fi
+
 while true; do
-    read -rp "Enter the Odoo HTTP port [8069]: " OE_PORT
-    OE_PORT="${OE_PORT:-8069}"
+    read -rp "Enter the Odoo HTTP port [$DEFAULT_PORT]: " OE_PORT
+    OE_PORT="${OE_PORT:-$DEFAULT_PORT}"
     if ! validate_port "$OE_PORT"; then
         log_error "Invalid port. Must be a number between 1024 and 65535."
+    elif port_in_use "$OE_PORT"; then
+        log_error "Port $OE_PORT is already in use. Free one: $DEFAULT_PORT."
+    elif port_in_use "$((OE_PORT + 1))"; then
+        log_error "Port $((OE_PORT + 1)) (websocket) is in use. Free pair starts at $DEFAULT_PORT."
     else
         break
     fi
@@ -470,11 +653,15 @@ echo -e "${BLUE}║${NC} Home Dir:        $OE_HOME"
 echo -e "${BLUE}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-read -rp "Proceed with installation? (yes/no): " CONFIRM
-CONFIRM="${CONFIRM,,}"
-if [ "$CONFIRM" != "yes" ]; then
-    log_warn "Installation cancelled by user."
-    exit 0
+if [ "$EXPRESS" = "yes" ]; then
+    log_info "Express mode — proceeding without confirmation."
+else
+    read -rp "Proceed with installation? (yes/no): " CONFIRM
+    CONFIRM="${CONFIRM,,}"
+    if [ "$CONFIRM" != "yes" ]; then
+        log_warn "Installation cancelled by user."
+        exit 0
+    fi
 fi
 
 # Persist before touching anything, so an interruption during step 1 still
