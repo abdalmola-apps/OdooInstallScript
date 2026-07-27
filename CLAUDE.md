@@ -30,6 +30,10 @@ sudo ./odoo_backup.sh -u <user> [-d <dir>] [-r 30] [-f] [-q]
 - Step numbers are a persisted interface. Renumbering or inserting a step mid-sequence corrupts resume for interrupted installs — append new steps at the end.
 - Every step body must be idempotent on its own (existence checks before create), because a step can re-run after a mid-step crash.
 
+State lives in `/var/lib/odoo-install/<user>.{checkpoint,answers}`, root-owned in a 700 directory — not `/tmp`, because the answers file is `source`d as root and a world-writable location would be a local privilege escalation. A pre-2.2 `/tmp/odoo_setup_checkpoint_<user>` is migrated on sight.
+
+**The prompt block is wrapped in `if [ "$REUSE_ANSWERS" = "yes" ] … else … fi`,** closed by a lone `fi` marked with a comment. Anything a *reused* run also needs (currently `RAM_MB` and the `VALID_ADDON_URLS` parsing) must sit after that `fi`, not inside the prompt branch — the answers file stores the raw `CUSTOM_ADDONS_INPUT` string, not the parsed array. Adding a prompt means adding the variable to `save_answers()` too, or it silently reverts to its default on resume.
+
 **Config-file contract between scripts.** `odoo_install.sh` step 11 writes `$OE_HOME/${OE_USER}-odoo.conf` including a literal `; Security` comment line; `odoo_nginx.sh` step 5 patches `proxy_mode` by looking for `^proxy_mode`, falling back to inserting after `^; Security`. Changing that comment or the key's default breaks the standalone nginx path silently.
 
 The websocket port key is version-conditional (`$GEVENT_KEY`): `gevent_port` on Odoo 16+, `longpolling_port` below. It must stay in sync with the `/websocket` upstream in `odoo_nginx.sh`, which proxies to `OE_PORT + 1` — writing the wrong key leaves Odoo on its 8072 default and breaks websockets with no error in the log.

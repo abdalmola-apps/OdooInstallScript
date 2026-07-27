@@ -301,14 +301,52 @@ The standard `apt` version uses an unpatched Qt library that doesn't support `--
 
 ## Checkpoint System
 
-The script saves progress after each step to `/tmp/odoo_setup_checkpoint_<username>`. If interrupted:
+The script saves both its progress and your answers to `/var/lib/odoo-install/` (root-only, `chmod 700`):
 
-- Re-run the script with the same username
-- Completed steps are automatically skipped
-- Installation resumes from the last incomplete step
-- On failure, the error handler shows which step failed and how to resume
+| File | Contents |
+|------|----------|
+| `<username>.checkpoint` | Last completed step number |
+| `<username>.answers` | The answers to all 11 prompts |
 
-The checkpoint file is removed on successful completion.
+### Resuming an interrupted install
+
+```bash
+sudo ./odoo_install.sh
+```
+
+1. Enter **the same username** — it is the key for the saved state, so it is the one question always asked.
+2. Answer `yes` to *"Reuse its answers and skip the questions?"* — the other ten prompts are skipped.
+3. Check the summary and confirm.
+
+Completed steps are skipped and the install continues from where it stopped. Answering `no` at step 2 re-asks everything instead.
+
+On failure the error handler prints the failed step, the resume instructions, and the state file path. Both state files are deleted on successful completion.
+
+Because the state lives under `/var/lib` rather than `/tmp`, a resume survives a reboot.
+
+### Unattended installs
+
+Write the answers file yourself and the script will only ask for confirmation:
+
+```bash
+sudo mkdir -p /var/lib/odoo-install && sudo chmod 700 /var/lib/odoo-install
+sudo tee /var/lib/odoo-install/odoo18.answers > /dev/null <<'EOF'
+OE_VERSION=18.0
+OE_PORT=8069
+INSTALL_NGINX=yes
+OE_DOMAIN=erp.example.com
+CERTBOT_EMAIL=admin@example.com
+CUSTOM_ADDONS_INPUT=https://github.com/OCA/web.git
+SETUP_SWAP=yes
+SETUP_BACKUP=yes
+BACKUP_FILESTORE=yes
+BACKUP_RETENTION=30
+BACKUP_HOUR=02:00
+EOF
+sudo chmod 600 /var/lib/odoo-install/odoo18.answers
+```
+
+The file is sourced as root, which is why the directory must not be world-writable.
 
 ## Directory Structure
 
