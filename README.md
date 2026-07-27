@@ -196,15 +196,17 @@ When backups are enabled during installation, the script installs `odoo_backup.s
 1. Discovers all PostgreSQL databases owned by the Odoo user
 2. Queries each database for the latest `write_date` from `res_users`
 3. Sorts databases by activity (most recently used first)
-4. Creates compressed `pg_dump` backups (custom format, compression level 5)
-5. Optionally archives the filestore directory for each database
-6. Cleans up backups older than the retention period (default: 30 days)
+4. Backs each one up with `click-odoo-backupdb` as a single Odoo-native zip
+5. Cleans up backups older than the retention period (default: 30 days)
+
+Exits non-zero if any database fails, so cron surfaces the failure instead of a backup job that silently does nothing every night.
 
 ### Backup Files
 
-- **Database dumps**: `<dbname>_<timestamp>.dump` (restorable via `pg_restore`)
-- **Filestore archives**: `<dbname>_filestore_<timestamp>.tar.gz`
+- **Backups**: `<dbname>_<timestamp>.zip` — `manifest.json` + `dump.sql` + `filestore/`, deflate-compressed with zip64 (no 4 GB limit)
 - **Log**: `/home/<username>/data/backup.log`
+
+The zip is the same layout Odoo's own database manager produces, so it restores through the web interface as well as from the CLI. Requires `click-odoo-contrib` in the instance venv — this repo's `requirements.txt` installs it.
 
 ### Running Manually
 
@@ -232,13 +234,23 @@ sudo ./odoo_backup.sh -u <username> -f -q
 
 ### Restoring a Backup
 
-```bash
-# Restore database
-sudo -u <username> pg_restore -d <new_dbname> --create /home/<username>/backups/<dbname>_<timestamp>.dump
+Database and filestore restore together in one command:
 
-# Restore filestore
-sudo -u <username> tar -xzf /home/<username>/backups/<dbname>_filestore_<timestamp>.tar.gz -C /home/<username>/data/filestore/
+```bash
+sudo -u <username> /home/<username>/odoo/venv/bin/click-odoo-restoredb \
+    -c /home/<username>/<username>-odoo.conf \
+    <new_dbname> /home/<username>/backups/<dbname>_<timestamp>.zip
 ```
+
+Useful flags:
+
+| Flag | Effect |
+|------|--------|
+| `--neutralize` | Disables scheduled actions and outgoing mail — always use this for staging or dev copies |
+| `--force` | Overwrite `<new_dbname>` if it already exists |
+| `--copy` / `--move` | `--copy` (default) regenerates the database UUID so the restore does not conflict with the original |
+
+The zip also uploads through Odoo's own database manager (`/web/database/manager`) if you prefer the web interface — note `list_db = False` hides it by default.
 
 ## Standalone Nginx Setup
 

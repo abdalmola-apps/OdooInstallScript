@@ -4,8 +4,16 @@
 # Odoo Database Backup Script
 #
 # Discovers all PostgreSQL databases owned by the Odoo system user, sorts them
-# by latest write activity (most recent first), and creates compressed backups.
-# Optionally includes filestore directories.
+# by latest write activity (most recent first), and backs each one up with
+# click-odoo-backupdb.
+#
+# Output is one Odoo-native .zip per database (manifest.json + dump.sql +
+# filestore), restorable through Odoo's own web interface or with
+# click-odoo-restoredb — rather than a pg_dump plus a separate filestore
+# tarball that have to be restored as two steps that can drift apart.
+#
+# Requires click-odoo-contrib in the instance venv (this repo's
+# requirements.txt installs it).
 #
 # Usage:
 #   sudo ./odoo_backup.sh -u <username> [-d <backup_dir>] [-r <days>] [-f] [-q]
@@ -81,9 +89,16 @@ Required:
 Options:
   -d <backup_dir>  Override backup directory (default: /home/<user>/backups)
   -r <days>        Retention: delete backups older than N days (default: 30)
-  -f               Include filestore in backup (tar the data_dir/filestore)
+  -f               Include the filestore in the backup
   -q               Quiet mode — only output errors (for cron)
   -h               Show this help message
+
+Output:
+  One <dbname>_<timestamp>.zip per database (manifest.json + dump.sql +
+  filestore). Restore through Odoo's web interface, or:
+    sudo -u <user> /home/<user>/odoo/venv/bin/click-odoo-restoredb \\
+        -c /home/<user>/<user>-odoo.conf --neutralize <newdb> <backup.zip>
+  (--neutralize disables crons and outgoing mail — use it for staging copies.)
 
 Examples:
   # Interactive backup with filestore
@@ -137,13 +152,35 @@ fi
 # ==============================================================================
 
 OE_HOME="/home/$OE_USER"
-OE_DATA_DIR="$OE_HOME/data"
 
 if [ -z "$BACKUP_DIR" ]; then
     BACKUP_DIR="$OE_HOME/backups"
 fi
 
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
+
+# click-odoo-backupdb imports odoo, so it has to be the instance's own venv.
+BACKUPDB="$OE_HOME/odoo/venv/bin/click-odoo-backupdb"
+if [ ! -x "$BACKUPDB" ]; then
+    log_error "click-odoo-backupdb not found at $BACKUPDB"
+    log_error "Install it into the instance venv:"
+    log_error "  sudo -u $OE_USER $OE_HOME/odoo/venv/bin/pip install click-odoo-contrib"
+    exit 1
+fi
+
+# -c is required: without it click-odoo cannot resolve data_dir, so it would
+# look for the filestore in the wrong place and back up nothing.
+ODOO_CONF=""
+for candidate in "$OE_HOME/${OE_USER}-odoo.conf" "$OE_HOME/odoo.conf"; do
+    if [ -f "$candidate" ]; then
+        ODOO_CONF="$candidate"
+        break
+    fi
+done
+if [ -z "$ODOO_CONF" ]; then
+    log_error "No Odoo config found in $OE_HOME (looked for ${OE_USER}-odoo.conf, odoo.conf)."
+    exit 1
+fi
 
 # ==============================================================================
 # Start Backup
@@ -204,11 +241,15 @@ for db in $DATABASES; do
     DB_ACTIVITY["$db"]="$LAST_WRITE"
 done
 
-# Sort databases by activity date (most recent first)
+# Sort databases by activity date (most recent first).
+# Tab-separated, not space: write_date renders as "2026-07-01 10:00:00.123456",
+# so `awk '{print $2}'` on a space-joined line returned the time instead of the
+# database name — every real Odoo database then blew up on an unbound
+# DB_ACTIVITY lookup under `set -u`.
 SORTED_DBS=$(
     for db in "${!DB_ACTIVITY[@]}"; do
-        echo "${DB_ACTIVITY[$db]} $db"
-    done | sort -r | awk '{print $2}'
+        printf '%s\t%s\n' "${DB_ACTIVITY[$db]}" "$db"
+    done | sort -r | cut -f2
 )
 
 log_info "Backup order (most active first):"
@@ -225,39 +266,32 @@ done
 BACKED_UP=0
 FAILED=0
 
+# Keep -f meaning "opt in to the filestore", matching this script's existing
+# flag and the installer's cron line. click-odoo-backupdb defaults the other way.
+if [ "$INCLUDE_FILESTORE" = true ]; then
+    FILESTORE_FLAG="--filestore"
+else
+    FILESTORE_FLAG="--no-filestore"
+fi
+
 for db in $SORTED_DBS; do
-    DUMP_FILE="$BACKUP_DIR/${db}_${TIMESTAMP}.dump"
+    ZIP_FILE="$BACKUP_DIR/${db}_${TIMESTAMP}.zip"
 
     log_info "Backing up database '$db'..."
 
-    if sudo -u "$OE_USER" pg_dump -Fc -Z5 "$db" -f "$DUMP_FILE" 2>/dev/null; then
-        DUMP_SIZE=$(du -sh "$DUMP_FILE" | cut -f1)
-        log_success "  Database dump: $DUMP_FILE ($DUMP_SIZE)"
+    # Runs as the Odoo user: the config is chmod 640 and the filestore is owned
+    # by that user. -H so click-odoo resolves the right HOME.
+    if sudo -u "$OE_USER" -H "$BACKUPDB" -c "$ODOO_CONF" \
+            --format zip "$FILESTORE_FLAG" "$db" "$ZIP_FILE"; then
+        ZIP_SIZE=$(du -sh "$ZIP_FILE" | cut -f1)
+        log_success "  Backup: $ZIP_FILE ($ZIP_SIZE)"
         BACKED_UP=$((BACKED_UP + 1))
     else
-        log_error "  Failed to dump database '$db'."
-        rm -f "$DUMP_FILE"
+        log_error "  Failed to back up database '$db'."
+        # A partial zip is worse than none — it looks restorable and is not.
+        rm -f "$ZIP_FILE"
         FAILED=$((FAILED + 1))
         continue
-    fi
-
-    # Filestore backup (optional)
-    if [ "$INCLUDE_FILESTORE" = true ]; then
-        FILESTORE_DIR="$OE_DATA_DIR/filestore/$db"
-        if [ -d "$FILESTORE_DIR" ]; then
-            TAR_FILE="$BACKUP_DIR/${db}_filestore_${TIMESTAMP}.tar.gz"
-            log_info "  Backing up filestore for '$db'..."
-
-            if tar -czf "$TAR_FILE" -C "$OE_DATA_DIR/filestore" "$db" 2>/dev/null; then
-                TAR_SIZE=$(du -sh "$TAR_FILE" | cut -f1)
-                log_success "  Filestore archive: $TAR_FILE ($TAR_SIZE)"
-            else
-                log_error "  Failed to archive filestore for '$db'."
-                rm -f "$TAR_FILE"
-            fi
-        else
-            log_info "  No filestore directory for '$db'. Skipping filestore backup."
-        fi
     fi
 done
 
@@ -267,15 +301,17 @@ done
 
 log_info "Cleaning up backups older than $RETENTION_DAYS days..."
 
-CLEANED_DUMPS=$(find "$BACKUP_DIR" -name "*.dump" -mtime +"$RETENTION_DAYS" -type f 2>/dev/null | wc -l)
-CLEANED_TARS=$(find "$BACKUP_DIR" -name "*.tar.gz" -mtime +"$RETENTION_DAYS" -type f 2>/dev/null | wc -l)
+# .dump/.tar.gz are the pre-click-odoo layout — still aged out so backups made
+# by an older version of this script do not accumulate forever.
+CLEANED=0
+for pattern in "*.zip" "*.dump" "*.tar.gz"; do
+    N=$(find "$BACKUP_DIR" -name "$pattern" -mtime +"$RETENTION_DAYS" -type f 2>/dev/null | wc -l)
+    find "$BACKUP_DIR" -name "$pattern" -mtime +"$RETENTION_DAYS" -type f -delete 2>/dev/null || true
+    CLEANED=$((CLEANED + N))
+done
 
-find "$BACKUP_DIR" -name "*.dump" -mtime +"$RETENTION_DAYS" -type f -delete 2>/dev/null || true
-find "$BACKUP_DIR" -name "*.tar.gz" -mtime +"$RETENTION_DAYS" -type f -delete 2>/dev/null || true
-
-CLEANED=$((CLEANED_DUMPS + CLEANED_TARS))
 if [ "$CLEANED" -gt 0 ]; then
-    log_info "Removed $CLEANED old backup file(s) ($CLEANED_DUMPS dumps, $CLEANED_TARS archives)."
+    log_info "Removed $CLEANED backup file(s) older than $RETENTION_DAYS days."
 else
     log_info "No old backups to clean up."
 fi
@@ -295,4 +331,12 @@ fi
 log_info "Old files cleaned: $CLEANED"
 log_info "Backup directory size: $TOTAL_SIZE"
 log_info "Location: $BACKUP_DIR"
+
+# Exit non-zero if anything failed, so cron reports it. A backup job that
+# fails every night while exiting 0 is indistinguishable from one that works.
+if [ "$FAILED" -gt 0 ]; then
+    log_error "Backup finished with $FAILED failure(s)."
+    exit 1
+fi
+
 log_success "Backup complete."
