@@ -75,6 +75,10 @@ validate_version() {
     [[ "$1" =~ ^[0-9]+\.0$ ]]
 }
 
+validate_db_name() {
+    [[ "$1" =~ ^[a-zA-Z][a-zA-Z0-9_]*$ ]]
+}
+
 validate_git_url() {
     [[ "$1" =~ ^https://.*\.git$ ]] || [[ "$1" =~ ^git@.*\.git$ ]] || [[ "$1" =~ ^https://.+ ]]
 }
@@ -214,6 +218,10 @@ SETUP_BACKUP=$(printf '%q' "$SETUP_BACKUP")
 BACKUP_FILESTORE=$(printf '%q' "$BACKUP_FILESTORE")
 BACKUP_RETENTION=$(printf '%q' "$BACKUP_RETENTION")
 BACKUP_HOUR=$(printf '%q' "$BACKUP_HOUR")
+CREATE_DB=$(printf '%q' "$CREATE_DB")
+DB_NAME=$(printf '%q' "$DB_NAME")
+DB_MODE=$(printf '%q' "$DB_MODE")
+DB_DEMO=$(printf '%q' "$DB_DEMO")
 ANSWERS
     sudo chmod 600 "$ANSWERS_FILE"
 }
@@ -241,7 +249,7 @@ cleanup() {
     # "failed at step unknown, resume from step 1" just muddies it.
     if [ $exit_code -ne 0 ] && [ "${CURRENT_STEP:-0}" -ge 1 ]; then
         echo ""
-        log_error "Script failed at step ${CURRENT_STEP:-unknown} of 19 (exit code: $exit_code)"
+        log_error "Script failed at step ${CURRENT_STEP:-unknown} of 20 (exit code: $exit_code)"
         log_error "To resume: re-run this script, enter the same username"
         log_error "('${OE_USER:-<username>}'), and accept the saved answers when asked."
         log_error "It will skip the completed steps and continue from step ${CURRENT_STEP:-1}."
@@ -360,7 +368,7 @@ fi
 
 REUSE_ANSWERS="no"
 if sudo test -f "$ANSWERS_FILE"; then
-    log_info "A previous run for '$OE_USER' stopped after step $(get_last_checkpoint) of 19."
+    log_info "A previous run for '$OE_USER' stopped after step $(get_last_checkpoint) of 20."
     if [ "$EXPRESS" = "yes" ]; then
         REUSE_ANSWERS="yes"
         log_info "Express mode — reusing the saved answers."
@@ -391,6 +399,10 @@ elif [ "$EXPRESS" = "yes" ]; then
     BACKUP_FILESTORE="yes"
     BACKUP_RETENTION=30
     BACKUP_HOUR="02:00"
+    CREATE_DB="yes"
+    DB_NAME="$OE_USER"
+    DB_MODE="prod"
+    DB_DEMO="no"
     log_success "Express mode: Odoo $OE_VERSION on port $OE_PORT, no Nginx, daily backups at $BACKUP_HOUR."
 
 else
@@ -613,6 +625,60 @@ if [ "$SETUP_BACKUP" = "yes" ]; then
     done
 fi
 
+# --- First Database ---
+# The config sets list_db = False, so Odoo's database manager is hidden and
+# there is no way to create the first database from the browser. Without this
+# the install ends with a running server nobody can log into.
+while true; do
+    read -rp "Create the first database now? (yes/no) [yes]: " CREATE_DB
+    CREATE_DB="${CREATE_DB:-yes}"
+    CREATE_DB="${CREATE_DB,,}"
+    if [[ "$CREATE_DB" == "yes" || "$CREATE_DB" == "no" ]]; then
+        break
+    fi
+    log_error "Please answer 'yes' or 'no'."
+done
+
+DB_NAME=""
+DB_MODE="prod"
+DB_DEMO="no"
+if [ "$CREATE_DB" = "yes" ]; then
+    while true; do
+        read -rp "Database name [$OE_USER]: " DB_NAME
+        DB_NAME="${DB_NAME:-$OE_USER}"
+        if validate_db_name "$DB_NAME"; then
+            break
+        fi
+        log_error "Invalid name. Start with a letter; letters, digits and underscores only."
+    done
+
+    while true; do
+        read -rp "Is this database production or demo? (prod/demo) [prod]: " DB_MODE
+        DB_MODE="${DB_MODE:-prod}"
+        DB_MODE="${DB_MODE,,}"
+        if [[ "$DB_MODE" == "prod" || "$DB_MODE" == "demo" ]]; then
+            break
+        fi
+        log_error "Please answer 'prod' or 'demo'."
+    done
+
+    if [ "$DB_MODE" = "demo" ]; then
+        while true; do
+            read -rp "Load Odoo demo data? (yes/no) [yes]: " DB_DEMO
+            DB_DEMO="${DB_DEMO:-yes}"
+            DB_DEMO="${DB_DEMO,,}"
+            if [[ "$DB_DEMO" == "yes" || "$DB_DEMO" == "no" ]]; then
+                break
+            fi
+            log_error "Please answer 'yes' or 'no'."
+        done
+    else
+        # Production never gets demo data — it is close to impossible to remove
+        # cleanly once installed.
+        DB_DEMO="no"
+    fi
+fi
+
 fi # end of the prompt block skipped when reusing saved answers
 
 # Runs either way: on a reused run these come from the answers file, and the
@@ -748,6 +814,11 @@ if [ "$SETUP_BACKUP" = "yes" ]; then
 echo -e "${BLUE}║${NC}   Filestore:     $BACKUP_FILESTORE"
 echo -e "${BLUE}║${NC}   Retention:     ${BACKUP_RETENTION} days"
 echo -e "${BLUE}║${NC}   Schedule:      Daily at $BACKUP_HOUR"
+fi
+echo -e "${BLUE}║${NC} First Database:  $CREATE_DB"
+if [ "$CREATE_DB" = "yes" ]; then
+echo -e "${BLUE}║${NC}   Name:          $DB_NAME"
+echo -e "${BLUE}║${NC}   Type:          $DB_MODE (demo data: $DB_DEMO)"
 fi
 echo -e "${BLUE}║${NC} Home Dir:        $OE_HOME"
 echo -e "${BLUE}╚══════════════════════════════════════════════════════════╝${NC}"
@@ -1287,6 +1358,49 @@ if step 19 "Set Up Automated Backups"; then
     save_checkpoint 19
 fi
 
+# Step 20: Create the First Database
+# Appended rather than inserted: step numbers are persisted in the checkpoint
+# file, so renumbering would corrupt resume for in-flight installs.
+ADMIN_USER_PASSWD=""
+if step 20 "Create First Database"; then
+    if [ "$CREATE_DB" = "yes" ]; then
+        if sudo -u postgres psql -tAc \
+             "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'" | grep -q 1; then
+            log_success "Database '$DB_NAME' already exists. Skipping creation."
+        else
+            DEMO_ARGS=()
+            if [ "$DB_DEMO" != "yes" ]; then
+                DEMO_ARGS=(--without-demo=all)
+            fi
+
+            log_info "Creating '$DB_NAME' ($DB_MODE, demo data: $DB_DEMO). This takes a few minutes..."
+            # --no-http because the service from step 18 already holds the port,
+            # --workers=0 so this init runs in one process.
+            sudo -u "$OE_USER" -H "$OE_HOME_EXT/venv/bin/python3" "$OE_HOME_EXT/odoo-bin" \
+                -c "$OE_HOME/$OE_CONFIG" -d "$DB_NAME" -i base "${DEMO_ARGS[@]}" \
+                --workers=0 --no-http --stop-after-init --log-level=warn
+
+            # Odoo ships admin/admin. Replace it before anything is reachable.
+            # odoo-bin shell execs piped stdin, then rolls back — hence commit().
+            ADMIN_USER_PASSWD="$(generate_password 16)"
+            if printf "env.ref('base.user_admin').write({'password': '%s'})\nenv.cr.commit()\n" \
+                 "$ADMIN_USER_PASSWD" \
+               | sudo -u "$OE_USER" -H "$OE_HOME_EXT/venv/bin/python3" "$OE_HOME_EXT/odoo-bin" \
+                     shell -c "$OE_HOME/$OE_CONFIG" -d "$DB_NAME" --no-http --log-level=warn \
+                     > /dev/null 2>&1; then
+                log_success "Database '$DB_NAME' created; admin password set."
+            else
+                ADMIN_USER_PASSWD=""
+                log_warn "Database created, but setting the admin password failed."
+                log_warn "The admin login is still admin/admin — change it at first login."
+            fi
+        fi
+    else
+        log_info "First database skipped (not selected)."
+    fi
+    save_checkpoint 20
+fi
+
 # ==============================================================================
 # Section 10: Final Summary
 # ==============================================================================
@@ -1305,7 +1419,23 @@ echo -e "${GREEN}╠════════════════════
 echo -e "${GREEN}║${NC} Odoo User:       ${BLUE}$OE_USER${NC}"
 echo -e "${GREEN}║${NC} Odoo Version:    ${BLUE}$OE_VERSION${NC}"
 echo -e "${GREEN}║${NC} Access URL:      ${BLUE}$ACCESS_URL${NC}"
-echo -e "${GREEN}║${NC} Admin Password:  ${RED}$ADMIN_PASSWD${NC}"
+echo -e "${GREEN}║${NC}"
+echo -e "${GREEN}║${NC} Master Password: ${RED}$ADMIN_PASSWD${NC}"
+echo -e "${GREEN}║${NC}   (database management only — not a login)"
+if [ "$CREATE_DB" = "yes" ]; then
+echo -e "${GREEN}║${NC} Database:        $DB_NAME ($DB_MODE, demo data: $DB_DEMO)"
+if [ -n "$ADMIN_USER_PASSWD" ]; then
+echo -e "${GREEN}║${NC} Login:           ${BLUE}admin${NC} / ${RED}$ADMIN_USER_PASSWD${NC}"
+else
+echo -e "${GREEN}║${NC} Login:           ${BLUE}admin${NC} / set on an earlier run (or still admin)"
+fi
+else
+echo -e "${GREEN}║${NC} Database:        ${YELLOW}none created${NC}"
+echo -e "${GREEN}║${NC}   list_db = False hides the database manager, so create one with:"
+echo -e "${GREEN}║${NC}   ${YELLOW}sudo -u $OE_USER $OE_HOME_EXT/venv/bin/python3 $OE_HOME_EXT/odoo-bin \\${NC}"
+echo -e "${GREEN}║${NC}   ${YELLOW}  -c $OE_HOME/$OE_CONFIG -d <name> -i base --without-demo=all \\${NC}"
+echo -e "${GREEN}║${NC}   ${YELLOW}  --workers=0 --no-http --stop-after-init${NC}"
+fi
 echo -e "${GREEN}║${NC}"
 echo -e "${GREEN}║${NC} Config File:     $OE_HOME/$OE_CONFIG"
 echo -e "${GREEN}║${NC} Log File:        $OE_DATA_DIR/odoo-server.log"

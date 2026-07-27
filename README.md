@@ -141,7 +141,7 @@ Proceed with installation? (yes/no): yes
 
 ## Installation Steps
 
-The script performs 19 automated steps:
+The script performs 20 automated steps:
 
 | Step | Description |
 |------|-------------|
@@ -164,6 +164,7 @@ The script performs 19 automated steps:
 | 17 | Set up swap file *(conditional)* |
 | 18 | Enable & start Odoo service |
 | 19 | Set up automated daily backups *(conditional, uses `odoo_backup.sh`)* |
+| 20 | Create the first database *(conditional)* |
 
 ## What Gets Installed
 
@@ -181,6 +182,26 @@ The script performs 19 automated steps:
 - All packages from Odoo's `requirements.txt`
 - num2words, ofxparse, dbfread, ebaysdk, firebase_admin, pyOpenSSL
 - Additional packages from this repository's `requirements.txt` (if present)
+
+## First Database
+
+`list_db = False` hides Odoo's database manager, so there is no way to create the first database from a browser. Step 20 creates it instead — otherwise the install finishes with a running server nobody can log into.
+
+| Prompt | Effect |
+|--------|--------|
+| Create the first database now? | `no` leaves it to you; the final summary prints the command |
+| Database name | Defaults to the system username |
+| Production or demo? | `prod` never loads demo data — it cannot be removed cleanly afterwards |
+| Load demo data? | Only asked for `demo` |
+
+The database is created with `base` installed, then the `admin` password is replaced with a random one and printed in the final summary. Odoo ships `admin`/`admin`, which is not something to leave on a server that is about to be reachable.
+
+Two different passwords end up in that summary:
+
+- **Master password** — `admin_passwd` in the config. Guards database management operations. Not a login.
+- **Login** — `admin` plus the generated password. This is what you sign in with.
+
+Re-running is safe: if the database already exists the step is skipped rather than recreated.
 
 ## Security
 
