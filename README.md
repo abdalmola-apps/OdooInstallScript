@@ -468,7 +468,28 @@ When enabled, the script creates a swap file:
 
 The menu is built at runtime from the branches that exist in `github.com/odoo/odoo`, so it stays correct as Odoo releases rather than drifting against a hardcoded list. Type a number to pick one, or type any version directly — `14.0` and older still work, they are just not listed.
 
-Whatever you choose is checked against the remote before the install begins. A typo used to survive validation (`23.0` matches the `XX.0` format) and only failed at step 4, after the user and database had already been created. If GitHub is unreachable the script falls back to a built-in list and skips the remote check.
+Each version is labelled with whether it can actually run on **this** server:
+
+```
+Available Odoo versions   (this server: Ubuntu noble, Python 3.12)
+  1) 19.0   (needs Python >= 3.10 — OK here)
+  2) 18.0   (needs Python >= 3.10 — OK here, default)
+  3) 17.0   (needs Python >= 3.10 — OK here)
+  4) 16.0   (needs Python >= 3.7 — OK here)
+```
+
+On an Ubuntu 20.04 box the same menu marks 17.0 and newer as *NOT usable* and switches the default to the newest version that runs there. Odoo versions and Python versions have to line up in both directions:
+
+| Check | Source | Effect |
+|-------|--------|--------|
+| Python too **old** for the Odoo version | `MIN_PY_VERSION` in Odoo's own source | Refused — Odoo asserts on it at import and would never start |
+| Python too **new** for the Odoo version | highest `python_version` marker in that branch's `requirements.txt` | Warned, with a confirm — it would start, but step 6 has to build pinned wheels that were never published for an interpreter that new |
+
+The second case is the one that bites when installing an older Odoo on a current Ubuntu: 14.0's requirements stop at Python 3.9, so on 22.04 (3.10) or 24.04 (3.12) the `pip install` step fails compiling gevent. The script now says so at the prompt instead of after four steps of system changes.
+
+Odoo moved where it declares its minimum — `odoo/release.py` in 19.0+, `odoo/__init__.py` in 15.0–18.0, and a bare `assert` in 14.0 and older — so all three are checked.
+
+A typo is caught here too: `23.0` passes the `XX.0` format check and used to fail at step 4, after the system and database users had been created. If GitHub is unreachable the script falls back to a built-in list and skips these checks.
 
 ## Port Selection
 

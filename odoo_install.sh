@@ -97,6 +97,44 @@ odoo_branch_exists() {
     git ls-remote --heads --exit-code "$ODOO_REPO" "refs/heads/$1" >/dev/null 2>&1
 }
 
+readonly ODOO_RAW="https://raw.githubusercontent.com/odoo/odoo"
+
+system_python_version() {
+    python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])'
+}
+
+# Lowest Python a branch will start on, read from Odoo's own declaration.
+# Its location and spelling have both moved: release.py in 19.0+,
+# __init__.py in 15.0-18.0, and a bare assert in 14.0 and older.
+odoo_min_python() {
+    local v="$1" f raw
+    for f in "odoo/release.py" "odoo/__init__.py"; do
+        raw="$(timeout 12 curl -sfL --max-time 10 "$ODOO_RAW/$v/$f" 2>/dev/null \
+               | grep -oE '(MIN_PY_VERSION *=|sys\.version_info *>=?) *\([0-9]+, *[0-9]+\)' \
+               | grep -oE '[0-9]+, *[0-9]+' | head -1 | tr -d ' ')" || true
+        if [ -n "$raw" ]; then
+            echo "${raw/,/.}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Highest Python the branch's requirements.txt has pins for. Approximate — it
+# is the newest interpreter Odoo bothered to write markers for, which is the
+# practical ceiling: past it, pinned wheels stop existing and the pip step in
+# step 6 fails compiling gevent and friends.
+odoo_max_python() {
+    timeout 12 curl -sfL --max-time 10 "$ODOO_RAW/$1/requirements.txt" 2>/dev/null \
+        | grep -oE "python_version *[<>=!]+ *'[0-9]+\.[0-9]+'" \
+        | grep -oE "[0-9]+\.[0-9]+" | sort -V | tail -1
+}
+
+# "a <= b" on dotted versions.
+version_le() {
+    [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]
+}
+
 # --- Port Selection ---
 
 # A port counts as taken if something is listening on it, or if another
@@ -371,15 +409,47 @@ if [ ${#ODOO_VERSIONS[@]} -eq 0 ]; then
     log_warn "Could not reach github.com — falling back to a built-in version list."
 fi
 
+SYS_PY="$(system_python_version)"
+CODENAME_NOW="$(get_ubuntu_codename)"
+
 echo ""
-echo "Available Odoo versions:"
+echo "Available Odoo versions   (this server: Ubuntu $CODENAME_NOW, Python $SYS_PY)"
+
+# Probe the listed versions in parallel — four sequential round trips to
+# GitHub is a noticeable stall on an interactive prompt.
+PY_PROBE_DIR="$(mktemp -d)"
 for i in "${!ODOO_VERSIONS[@]}"; do
-    if [ "${ODOO_VERSIONS[$i]}" = "$DEFAULT_VERSION" ]; then
-        printf "  %d) %s   (default)\n" "$((i + 1))" "${ODOO_VERSIONS[$i]}"
-    else
-        printf "  %d) %s\n" "$((i + 1))" "${ODOO_VERSIONS[$i]}"
-    fi
+    ( odoo_min_python "${ODOO_VERSIONS[$i]}" > "$PY_PROBE_DIR/$i" 2>/dev/null || true ) &
 done
+wait
+
+NEWEST_OK=""
+declare -A MIN_PY_CACHE=()
+for i in "${!ODOO_VERSIONS[@]}"; do
+    v="${ODOO_VERSIONS[$i]}"
+    minpy="$(cat "$PY_PROBE_DIR/$i" 2>/dev/null || true)"
+    MIN_PY_CACHE["$v"]="$minpy"
+    note=""
+    if [ -z "$minpy" ]; then
+        note="requirement unknown"
+    elif version_le "$minpy" "$SYS_PY"; then
+        note="needs Python >= $minpy — OK here"
+        [ -z "$NEWEST_OK" ] && NEWEST_OK="$v"
+    else
+        note="needs Python >= $minpy — NOT usable on this server"
+    fi
+    [ "$v" = "$DEFAULT_VERSION" ] && note="$note, default"
+    printf "  %d) %-6s %s\n" "$((i + 1))" "$v" "($note)"
+done
+rm -rf "$PY_PROBE_DIR"
+
+# If the usual default cannot run here, offer the newest one that can.
+DEFAULT_MIN_PY="${MIN_PY_CACHE[$DEFAULT_VERSION]:-}"
+if [ -n "$NEWEST_OK" ] && [ "$NEWEST_OK" != "$DEFAULT_VERSION" ] \
+   && { [ -z "$DEFAULT_MIN_PY" ] || ! version_le "$DEFAULT_MIN_PY" "$SYS_PY"; }; then
+    log_warn "Odoo $DEFAULT_VERSION cannot run on Python $SYS_PY — defaulting to $NEWEST_OK."
+    DEFAULT_VERSION="$NEWEST_OK"
+fi
 echo ""
 
 while true; do
@@ -397,12 +467,42 @@ while true; do
 
     if ! validate_version "$OE_VERSION"; then
         log_error "Invalid version format. Expected XX.0 (e.g. 18.0), or a number from the list."
-    elif [ "$NETWORK_OK" = "yes" ] && ! odoo_branch_exists "$OE_VERSION"; then
-        log_error "No branch '$OE_VERSION' in github.com/odoo/odoo."
-    else
-        log_info "Odoo version: $OE_VERSION"
-        break
+        continue
     fi
+    # Menu entries came from ls-remote, so only a typed version needs checking.
+    if [ "$NETWORK_OK" = "yes" ] && ! printf '%s\n' "${ODOO_VERSIONS[@]}" | grep -qx "$OE_VERSION" \
+       && ! odoo_branch_exists "$OE_VERSION"; then
+        log_error "No branch '$OE_VERSION' in github.com/odoo/odoo."
+        continue
+    fi
+
+    if [ "$NETWORK_OK" = "yes" ]; then
+        SEL_MIN_PY="${MIN_PY_CACHE[$OE_VERSION]:-}"
+        [ -z "$SEL_MIN_PY" ] && SEL_MIN_PY="$(odoo_min_python "$OE_VERSION" || true)"
+        SEL_MAX_PY="$(odoo_max_python "$OE_VERSION" || true)"
+
+        # Hard stop: Odoo asserts on this at import, so it cannot start at all.
+        if [ -n "$SEL_MIN_PY" ] && ! version_le "$SEL_MIN_PY" "$SYS_PY"; then
+            log_error "Odoo $OE_VERSION requires Python >= $SEL_MIN_PY, this server has $SYS_PY."
+            log_error "Pick a newer Odoo, or install on a newer Ubuntu."
+            continue
+        fi
+
+        # Soft stop: it would start, but step 6 has to build pinned wheels that
+        # were never published for an interpreter this new.
+        if [ -n "$SEL_MAX_PY" ] && ! version_le "$SYS_PY" "$SEL_MAX_PY"; then
+            log_warn "Odoo $OE_VERSION predates Python $SYS_PY — its requirements only"
+            log_warn "pin up to $SEL_MAX_PY, so installing dependencies will likely fail."
+            log_warn "Ubuntu $CODENAME_NOW ships Python $SYS_PY. Odoo ${ODOO_VERSIONS[0]} is the safe choice here."
+            read -rp "Use $OE_VERSION anyway? (yes/no) [no]: " FORCE_VER
+            if [ "${FORCE_VER,,}" != "yes" ]; then
+                continue
+            fi
+        fi
+    fi
+
+    log_info "Odoo version: $OE_VERSION"
+    break
 done
 
 # --- Port ---
