@@ -147,7 +147,10 @@ step() {
 
 cleanup() {
     local exit_code=$?
-    if [ $exit_code -ne 0 ]; then
+    # Only for failures once the install is underway. Input validation and the
+    # companion-script check print their own message; following it with
+    # "failed at step unknown, resume from step 1" just muddies it.
+    if [ $exit_code -ne 0 ] && [ "${CURRENT_STEP:-0}" -ge 1 ]; then
         echo ""
         log_error "Script failed at step ${CURRENT_STEP:-unknown} of 19 (exit code: $exit_code)"
         log_error "To resume: re-run this script, enter the same username"
@@ -406,6 +409,36 @@ MAX_CRON_THREADS=1
 LIMIT_MEMORY_SOFT=$(( (RAM_MB * 1024 * 1024 * 8 / 10) / (WORKERS + MAX_CRON_THREADS + 1) ))
 LIMIT_MEMORY_HARD=$(( LIMIT_MEMORY_SOFT * 12 / 10 ))
 DB_MAXCONN=$(( WORKERS * 2 + 4 ))
+
+# ==============================================================================
+# Companion Script Check
+# ==============================================================================
+
+# Fail now, not at step 15. Downloading odoo_install.sh on its own is an easy
+# mistake to make, and the alternative is discovering it after fourteen steps
+# of system changes have already been applied.
+MISSING_SCRIPTS=()
+if [ "$INSTALL_NGINX" = "yes" ] && [ ! -f "$SCRIPT_DIR/odoo_nginx.sh" ]; then
+    MISSING_SCRIPTS+=("odoo_nginx.sh — required for the Nginx + SSL step")
+fi
+if [ "$SETUP_BACKUP" = "yes" ] && [ ! -f "$SCRIPT_DIR/odoo_backup.sh" ]; then
+    MISSING_SCRIPTS+=("odoo_backup.sh — required for automated backups")
+fi
+
+if [ ${#MISSING_SCRIPTS[@]} -gt 0 ]; then
+    echo ""
+    log_error "Missing companion script(s) in $SCRIPT_DIR:"
+    for m in "${MISSING_SCRIPTS[@]}"; do
+        log_error "  - $m"
+    done
+    log_error ""
+    log_error "Download the whole repository rather than a single file:"
+    log_error "  git clone https://github.com/abdalmola-apps/OdooInstallScript.git"
+    log_error "  cd OdooInstallScript && sudo ./odoo_install.sh"
+    log_error ""
+    log_error "Or answer 'no' to that feature to install without it."
+    exit 1
+fi
 
 # ==============================================================================
 # Confirmation Summary

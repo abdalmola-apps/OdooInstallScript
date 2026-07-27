@@ -2,10 +2,14 @@
 
 Automated Bash script for deploying production-grade Odoo instances on Ubuntu servers. Handles everything from system setup to Nginx reverse proxy with SSL, firewall, swap, log rotation, and auto-tuned performance settings.
 
+**What it does:** takes a fresh Ubuntu server and leaves you with Odoo running under systemd — dedicated system and PostgreSQL users, Python venv, patched wkhtmltopdf, tuned worker and memory limits, log rotation, and a firewall. Optionally Nginx with Let's Encrypt, a swap file, and nightly backups.
+
+**What it does not do:** it does not install Odoo Enterprise, configure mail, set up replication or off-site backup copying, or manage the server after installation. It is a first-run installer, not a configuration-management tool — it will not reconcile a config you have since edited by hand.
+
 ## Features
 
 - **Production-Ready**: Nginx reverse proxy, Let's Encrypt SSL, UFW firewall, logrotate, swap
-- **Automated Backups**: Daily database backups sorted by activity, with filestore support and retention cleanup
+- **Automated Backups**: Nightly Odoo-native zips (database + filestore in one file) via `click-odoo-backupdb`, ordered by activity, with retention cleanup
 - **Auto-Tuned Performance**: Workers, memory limits, and DB connections computed from CPU cores and RAM
 - **Security Hardened**: Random admin password, no PostgreSQL superuser, config file chmod 640, input validation
 - **Multi-Instance Support**: Run multiple Odoo instances on the same server with different users and ports
@@ -24,22 +28,32 @@ Automated Bash script for deploying production-grade Odoo instances on Ubuntu se
 
 ## Quick Start
 
-### Download and Run
-
-```bash
-wget https://raw.githubusercontent.com/abdalmola-apps/OdooInstallScript/main/odoo_install.sh
-chmod +x odoo_install.sh
-sudo ./odoo_install.sh
-```
-
-### From Cloned Repository
-
 ```bash
 git clone https://github.com/abdalmola-apps/OdooInstallScript.git
 cd OdooInstallScript
-chmod +x odoo_install.sh
 sudo ./odoo_install.sh
 ```
+
+Then answer the prompts. Nothing is changed on the system until you confirm the summary.
+
+> **Clone the repository — do not download `odoo_install.sh` on its own.** The installer delegates the Nginx and backup steps to the other two scripts and expects them in the same directory. If you ask for a feature whose script is missing, it stops before making any changes and tells you.
+
+## Which files do I need?
+
+The three scripts are independent programs. Take only what you need:
+
+| I want | Files needed | Run |
+|--------|--------------|-----|
+| Odoo only — no reverse proxy, no backups | `odoo_install.sh` | `sudo ./odoo_install.sh`, answer `no` to Nginx and backups |
+| Odoo + Nginx + SSL | `odoo_install.sh`, `odoo_nginx.sh` | `sudo ./odoo_install.sh`, answer `yes` to Nginx |
+| Odoo + backups | `odoo_install.sh`, `odoo_backup.sh`, `requirements.txt` | `sudo ./odoo_install.sh`, answer `yes` to backups |
+| Everything | all of the above | `sudo ./odoo_install.sh` |
+| Nginx + SSL for an Odoo I already have | `odoo_nginx.sh` | [Standalone Nginx Setup](#standalone-nginx-setup) |
+| Backups for an Odoo I already have | `odoo_backup.sh` | [Automated Backups](#automated-backups) |
+
+`requirements.txt` is optional for a bare install, but **required for backups** — it installs `click-odoo-contrib`, which `odoo_backup.sh` uses. The installer picks it up automatically when it sits beside `odoo_install.sh`.
+
+`odoo_nginx.sh` and `odoo_backup.sh` are full command-line programs with their own `-h` output. Neither imports anything from `odoo_install.sh`, so both work on servers this installer never touched.
 
 ## Interactive Prompts
 
