@@ -1129,11 +1129,16 @@ if step 6 "Create Virtual Environment & Install Python Dependencies"; then
     sudo -u "$OE_USER" "$OE_HOME_EXT/venv/bin/pip" install --no-cache-dir \
         num2words ofxparse dbfread ebaysdk firebase_admin pyOpenSSL
 
-    # Extra requirements, from the checkout or from <prefix>/share/odoo-install
+    # Extra requirements, from the checkout or from <prefix>/share/odoo-install.
+    # pip runs as $OE_USER, so the file has to be readable by that user — a
+    # checkout under /root (mode 700) is not. Stage a copy inside $OE_HOME.
     if REQUIREMENTS_FILE="$(find_data_file requirements.txt)"; then
         log_info "Installing extra requirements from $REQUIREMENTS_FILE..."
+        EXTRA_REQ="$OE_HOME/.extra-requirements.txt"
+        sudo install -m 644 -o "$OE_USER" "$REQUIREMENTS_FILE" "$EXTRA_REQ"
         sudo -u "$OE_USER" "$OE_HOME_EXT/venv/bin/pip" install --no-cache-dir \
-            -r "$REQUIREMENTS_FILE"
+            -r "$EXTRA_REQ"
+        sudo rm -f "$EXTRA_REQ"
     fi
 
     log_success "Python dependencies installed."
