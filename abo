@@ -13,6 +13,7 @@
 #   abo update     pull the latest Odoo source and restart
 #   abo remove     delete an instance and everything it owns
 #   abo ssl        certificate status, and renew what is due
+#   abo status     how every instance on this server is doing
 #
 # Author: abdalmola
 # License: LGPL-3
@@ -54,6 +55,7 @@ Commands:
   update     Pull the latest Odoo source for an instance and restart it
   remove     Delete an instance: service, databases, files, Nginx site
   ssl        Report on the SSL certificates and renew whatever is due
+  status     Service, port, databases, backups and certificate at a glance
 
 Every command takes -h for its own options:
 
@@ -91,6 +93,7 @@ case "$CMD" in
     update)  run odoo_update.sh  "$@" ;;
     remove)  run odoo_remove.sh  "$@" ;;
     ssl)     run odoo_ssl.sh     "$@" ;;
+    status)  run odoo_status.sh  "$@" ;;
     version|--version|-v)
         echo "abo $ABO_VERSION"
         echo "scripts: $LIBDIR"

@@ -29,6 +29,7 @@ sudo make install        # -> /usr/local/bin/abo
 | `abo backup` | Back up every database an instance owns | `odoo_backup.sh` |
 | `abo update` | Pull the latest Odoo source and restart | `odoo_update.sh` |
 | `abo ssl` | Certificate status, renew what is due | `odoo_ssl.sh` |
+| `abo status` | How every instance is doing, at a glance | `odoo_status.sh` |
 | `abo remove` | Delete an instance and everything it owns | `odoo_remove.sh` |
 
 ```bash
@@ -37,12 +38,15 @@ sudo abo nginx  -u odoo18 -d erp.mycompany.com -e admin@mycompany.com
 sudo abo backup -u odoo18 -f
 sudo abo update -u odoo18
 sudo abo ssl
+sudo abo status
 sudo abo remove -u odoo18
 
 abo help · abo <cmd> -h · abo version
 ```
 
 `abo` is a dispatcher and nothing else — every script still runs directly out of the checkout, so installing is optional. Scripts land in `/usr/local/lib/abo/`; `sudo make uninstall` removes them, `make check` runs shellcheck.
+
+
 
 > Named `abo`, not `ab` — `ab` is ApacheBench, and `/usr/local/bin` precedes `/usr/bin`, so it would silently shadow it.
 
@@ -79,8 +83,21 @@ Everything is namespaced by the system username, which is what makes multiple in
 | HTTP port | first free pair from `8069` | Both it and the port above must be free |
 | Install Nginx? | `no` | Domain + email required if yes; DNS is checked before anything is installed |
 | Custom addon Git URLs | *optional* | Comma-separated |
-| Swap? | auto (`yes` if RAM < 4 GB) | Size = RAM, capped at 4 GB |
+| System timezone | the server's current one | Press Enter to change nothing. Validated against the tz database |
+| Swap? | auto (`yes` if RAM < 4 GB) | Then the size — see below |
 | Daily backups? | `yes` | Then: filestore, retention days, time |
+
+The timezone is the **system** one, not just Odoo's — logs, cron and the backup schedule all read it, and the PostgreSQL role is set to match.
+
+Swap defaults to RAM capped at 4 GB, and is capped again at **10% of the disk**, because it shares that disk with the database and the filestore:
+
+```
+  RAM: 8192MB   Disk: 20GB
+  Swap may be at most 10% of the disk: 2048MB (2GB)
+Swap size in GB [2]:
+```
+
+Anything larger is rejected rather than silently trimmed. If 10% of the disk is under 512 MB the disk is too small for swap to be worth the space, and it is skipped with a message. Free space is re-checked before the file is allocated, and a failed allocation is cleaned up rather than left as a partial `/swapfile`.
 
 ### Express
 
@@ -99,11 +116,13 @@ sudo install -d -m 700 /var/lib/odoo-install
 sudo tee /var/lib/odoo-install/odoo18.answers > /dev/null <<'EOF'
 OE_VERSION=18.0
 OE_PORT=8069
+OE_TIMEZONE=Europe/Berlin
 INSTALL_NGINX=yes
 OE_DOMAIN=erp.example.com
 CERTBOT_EMAIL=admin@example.com
 CUSTOM_ADDONS_INPUT=https://github.com/OCA/web.git
 SETUP_SWAP=yes
+SWAP_SIZE_MB=2048
 SETUP_BACKUP=yes
 BACKUP_FILESTORE=yes
 BACKUP_RETENTION=30
@@ -112,7 +131,7 @@ EOF
 sudo chmod 600 /var/lib/odoo-install/odoo18.answers
 ```
 
-The file is sourced as root — hence the 700 directory.
+The file is sourced as root — hence the 700 directory. `OE_TIMEZONE` and `SWAP_SIZE_MB` may be omitted: the timezone then stays whatever the server has, and the swap size falls back to the computed default. An answers file written before those two existed keeps working.
 
 ### If it is interrupted
 
@@ -123,6 +142,33 @@ State lives in `/var/lib/odoo-install/<user>.{checkpoint,answers}`, so a resume 
 `list_db = False` hides Odoo's database manager, so nothing can create the first database from a browser — the last step does it, or prints the command if you decline. The `admin` password is replaced with a random one and printed in the summary, alongside the master password (`admin_passwd`, guards database management, not a login).
 
 ## Day 2
+
+### Status
+
+```bash
+sudo abo status              # every instance on this server
+sudo abo status -u odoo18
+```
+
+```
+━━ odoo18 · port 8069
+    ✓ running for 6d 4h, listening on 8069
+    · Odoo 18.0 at a3f91c2  ·  5 workers
+    · 2 database(s): prod (1841 MB)  staging (612 MB)
+    ✓ backed up 9h ago (486M, 30 kept)
+    ✓ erp.example.com — certificate valid 71 more day(s)
+
+━━ server
+    ✓ disk 43% full, 118G free on /
+    · RAM 2914/3936MB  ·  swap 41/2048MB
+    ✓ certbot.timer armed
+```
+
+Every check is a cheap query — no `du` over the filestore — so it is fast enough to run whenever you wonder. **Exit status is non-zero when something needs attention**, which makes it a monitoring check as it stands.
+
+The one it exists for: a service that is `active` while nothing is listening on the port. `systemctl start` returns as soon as the process forks, so systemd reports success for an Odoo that died a second later — status checks the socket instead and says so plainly.
+
+It also flags a backup older than 48h, a certificate inside 21 days, a disk past 80%, and an unarmed `certbot.timer`.
 
 ### Update
 
@@ -277,7 +323,7 @@ The server's address comes from `hostname -I` **plus** its public IP via `api.ip
 | | | | |
 |---|---|---|---|
 | 1 PostgreSQL | 6 venv + Python deps | 11 Odoo config *(tuned)* | 16 UFW firewall |
-| 2 Timezone | 7 Node.js, LESS, rtlcss | 12 systemd unit | 17 Swap *(cond.)* |
+| 2 System timezone | 7 Node.js, LESS, rtlcss | 12 systemd unit | 17 Swap *(cond.)* |
 | 3 System + PG user | 8 Directories | 13 Ownership | 18 Start + wait for the port |
 | 4 Clone Odoo | 9 Ed25519 SSH key | 14 Logrotate | 19 Backup cron *(cond.)* |
 | 5 Deps + wkhtmltopdf | 10 Custom addon repos | 15 Nginx + SSL *(cond.)* | 20 First database *(cond.)* |

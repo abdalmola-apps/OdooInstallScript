@@ -234,6 +234,51 @@ get_total_ram_mb() {
     awk '/MemTotal/ { printf "%d", $2/1024 }' /proc/meminfo
 }
 
+# Size of the filesystem the swap file would live on, in MB. / rather than a
+# guess, because that is where /swapfile goes.
+get_disk_total_mb() {
+    df -BM --output=size / 2>/dev/null | tail -1 | tr -dc '0-9' || echo 0
+}
+
+get_disk_avail_mb() {
+    df -BM --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9' || echo 0
+}
+
+# A swap file big enough to matter but never big enough to fill the disk it
+# shares with the database and the filestore: 10% of the filesystem is the
+# ceiling, whatever the RAM says.
+max_swap_mb() {
+    echo $(( $(get_disk_total_mb) / 10 ))
+}
+
+default_swap_mb() {
+    local want max
+    want=$(get_total_ram_mb)
+    [ "$want" -gt 4096 ] && want=4096
+    max=$(max_swap_mb)
+    [ "$want" -gt "$max" ] && want=$max
+    echo "$want"
+}
+
+system_timezone() {
+    timedatectl show -p Timezone --value 2>/dev/null \
+        || cat /etc/timezone 2>/dev/null \
+        || echo "UTC"
+}
+
+# timedatectl's own list where it works, the zoneinfo database otherwise — the
+# list is empty in some containers and would reject every valid zone.
+validate_timezone() {
+    local tz="$1" list
+    [[ "$tz" =~ ^[A-Za-z0-9+_/-]+$ ]] || return 1
+    list="$(timedatectl list-timezones 2>/dev/null || true)"
+    if [ -n "$list" ]; then
+        printf '%s\n' "$list" | grep -qxF "$tz"
+    else
+        [ -f "/usr/share/zoneinfo/$tz" ]
+    fi
+}
+
 get_cpu_cores() {
     nproc
 }
@@ -255,6 +300,8 @@ save_answers() {
     sudo tee "$ANSWERS_FILE" > /dev/null <<ANSWERS
 OE_VERSION=$(printf '%q' "$OE_VERSION")
 OE_PORT=$(printf '%q' "$OE_PORT")
+OE_TIMEZONE=$(printf '%q' "$OE_TIMEZONE")
+SWAP_SIZE_MB=$(printf '%q' "$SWAP_SIZE_MB")
 INSTALL_NGINX=$(printf '%q' "$INSTALL_NGINX")
 OE_DOMAIN=$(printf '%q' "$OE_DOMAIN")
 CERTBOT_EMAIL=$(printf '%q' "$CERTBOT_EMAIL")
@@ -433,13 +480,18 @@ if [ "$REUSE_ANSWERS" = "yes" ]; then
 elif [ "$EXPRESS" = "yes" ]; then
     OE_VERSION="18.0"
     OE_PORT="$(find_free_port 8069 || echo 8069)"
+    # Whatever the server is already set to — express changes nothing here.
+    OE_TIMEZONE="$(system_timezone)"
     INSTALL_NGINX="no"
     OE_DOMAIN=""
     CERTBOT_EMAIL=""
     CUSTOM_ADDONS_INPUT=""
     SETUP_SWAP="no"
+    SWAP_SIZE_MB=0
     if [ "$(get_total_ram_mb)" -lt 4096 ]; then
         SETUP_SWAP="yes"
+        SWAP_SIZE_MB="$(default_swap_mb)"
+        [ "$SWAP_SIZE_MB" -gt 0 ] || SETUP_SWAP="no"
     fi
     SETUP_BACKUP="yes"
     BACKUP_FILESTORE="yes"
@@ -609,6 +661,21 @@ fi
 # --- Custom Addon Repos ---
 read -rp "Enter custom addon Git URLs (comma-separated, or leave empty): " CUSTOM_ADDONS_INPUT
 
+# --- Timezone ---
+# The system timezone, not just Odoo's — logs, cron and the backup schedule all
+# read it. Defaults to whatever the server already has, so the common answer is
+# to press Enter and change nothing.
+TZ_DEFAULT="$(system_timezone)"
+while true; do
+    read -rp "System timezone [$TZ_DEFAULT]: " OE_TIMEZONE
+    OE_TIMEZONE="${OE_TIMEZONE:-$TZ_DEFAULT}"
+    if validate_timezone "$OE_TIMEZONE"; then
+        break
+    fi
+    log_error "Unknown timezone: '$OE_TIMEZONE'. Use a tz name like Europe/Berlin or UTC."
+    log_error "List them with: timedatectl list-timezones"
+done
+
 # --- Swap ---
 SWAP_DEFAULT="no"
 if [ "$(get_total_ram_mb)" -lt 4096 ]; then
@@ -625,6 +692,42 @@ while true; do
     fi
     log_error "Please answer 'yes' or 'no'."
 done
+
+# --- Swap Size ---
+SWAP_SIZE_MB=0
+if [ "$SETUP_SWAP" = "yes" ]; then
+    SWAP_MAX_MB=$(max_swap_mb)
+    SWAP_DEFAULT_MB=$(default_swap_mb)
+
+    # A cap below 512MB means the disk is too small for swap to be worth the
+    # space it would take from the database.
+    if [ "$SWAP_MAX_MB" -lt 512 ]; then
+        log_warn "The disk is only $(( $(get_disk_total_mb) / 1024 ))GB, so 10% of it is"
+        log_warn "${SWAP_MAX_MB}MB — too small to be useful. Skipping swap."
+        SETUP_SWAP="no"
+    else
+        echo ""
+        echo "  RAM: $(get_total_ram_mb)MB   Disk: $(( $(get_disk_total_mb) / 1024 ))GB"
+        echo "  Swap may be at most 10% of the disk: ${SWAP_MAX_MB}MB ($(( SWAP_MAX_MB / 1024 ))GB)"
+        while true; do
+            read -rp "Swap size in GB [$(( SWAP_DEFAULT_MB / 1024 ))]: " SWAP_INPUT
+            if [ -z "$SWAP_INPUT" ]; then
+                SWAP_SIZE_MB=$SWAP_DEFAULT_MB
+                break
+            fi
+            if ! [[ "$SWAP_INPUT" =~ ^[0-9]+$ ]] || [ "$SWAP_INPUT" -eq 0 ]; then
+                log_error "Enter a whole number of GB, 1 or more."
+                continue
+            fi
+            SWAP_SIZE_MB=$(( SWAP_INPUT * 1024 ))
+            if [ "$SWAP_SIZE_MB" -gt "$SWAP_MAX_MB" ]; then
+                log_error "${SWAP_INPUT}GB is more than 10% of the disk (max ${SWAP_MAX_MB}MB)."
+                continue
+            fi
+            break
+        done
+    fi
+fi
 
 # --- Automated Backups ---
 while true; do
@@ -726,6 +829,24 @@ if [ "$CREATE_DB" = "yes" ]; then
 fi
 
 fi # end of the prompt block skipped when reusing saved answers
+
+# An answers file written before these two existed has neither, and this runs on
+# all three input paths — so fill them in here rather than inside the prompts.
+OE_TIMEZONE="${OE_TIMEZONE:-$(system_timezone)}"
+# Re-validated here because a hand-written answers file is a documented way to
+# run unattended, and this value reaches both `timedatectl set-timezone` and a
+# psql string literal. A typo would otherwise surface as a failure at step 2,
+# after the prompts are long past.
+if ! validate_timezone "$OE_TIMEZONE"; then
+    log_error "Invalid timezone '$OE_TIMEZONE' in the saved answers."
+    log_error "Fix OE_TIMEZONE in $ANSWERS_FILE, or delete the file to start over."
+    exit 1
+fi
+SWAP_SIZE_MB="${SWAP_SIZE_MB:-0}"
+if [ "$SETUP_SWAP" = "yes" ] && [ "$SWAP_SIZE_MB" -eq 0 ]; then
+    SWAP_SIZE_MB="$(default_swap_mb)"
+    [ "$SWAP_SIZE_MB" -ge 512 ] || SETUP_SWAP="no"
+fi
 
 # --- DNS gate -----------------------------------------------------------------
 # On every input path, and before anything is installed. Certbot cannot issue a
@@ -938,7 +1059,12 @@ echo -e "${BLUE}║${NC} Domain:          $OE_DOMAIN"
 echo -e "${BLUE}║${NC} Certbot Email:   $CERTBOT_EMAIL"
 fi
 echo -e "${BLUE}║${NC} Addon Repos:     ${#VALID_ADDON_URLS[@]}"
-echo -e "${BLUE}║${NC} Swap:            $SETUP_SWAP"
+echo -e "${BLUE}║${NC} Timezone:        $OE_TIMEZONE"
+if [ "$SETUP_SWAP" = "yes" ]; then
+echo -e "${BLUE}║${NC} Swap:            yes (${SWAP_SIZE_MB}MB)"
+else
+echo -e "${BLUE}║${NC} Swap:            no"
+fi
 echo -e "${BLUE}║${NC} Daily Backups:   $SETUP_BACKUP"
 if [ "$SETUP_BACKUP" = "yes" ]; then
 echo -e "${BLUE}║${NC}   Filestore:     $BACKUP_FILESTORE"
@@ -989,9 +1115,13 @@ if step 1 "Check & Install PostgreSQL"; then
 fi
 
 # Step 2: Set Timezone
-if step 2 "Set Timezone to Asia/Riyadh"; then
-    sudo timedatectl set-timezone Asia/Riyadh
-    log_success "System timezone set to Asia/Riyadh."
+if step 2 "Set System Timezone"; then
+    if [ "$(system_timezone)" = "$OE_TIMEZONE" ]; then
+        log_success "System timezone is already $OE_TIMEZONE."
+    else
+        sudo timedatectl set-timezone "$OE_TIMEZONE"
+        log_success "System timezone set to $OE_TIMEZONE."
+    fi
     save_checkpoint 2
 fi
 
@@ -1023,7 +1153,7 @@ if step 3 "Create System User & PostgreSQL User"; then
     fi
 
     # Set timezone for PostgreSQL user
-    sudo -u postgres psql -c "ALTER USER \"$OE_USER\" SET TIMEZONE = 'Asia/Riyadh';"
+    sudo -u postgres psql -c "ALTER USER \"$OE_USER\" SET TIMEZONE = '$OE_TIMEZONE';"
     log_success "PostgreSQL user configured."
     save_checkpoint 3
 fi
@@ -1394,14 +1524,22 @@ if step 17 "Set Up Swap File"; then
         if swapon --show | grep -q '/swapfile'; then
             log_success "Swap file already exists. Skipping."
         else
-            # Swap size = min(RAM_MB, 4096)MB
-            SWAP_SIZE_MB=$RAM_MB
-            if [ "$SWAP_SIZE_MB" -gt 4096 ]; then
-                SWAP_SIZE_MB=4096
+            # Size was chosen and capped at 10% of the disk during the prompts.
+            # Re-check free space here: fallocate would fail on a disk that has
+            # filled up since, leaving a partial /swapfile behind.
+            AVAIL_MB=$(get_disk_avail_mb)
+            if [ "$AVAIL_MB" -lt $(( SWAP_SIZE_MB + 512 )) ]; then
+                log_error "Only ${AVAIL_MB}MB free on / — not enough for a ${SWAP_SIZE_MB}MB swap file."
+                log_error "Free some space and re-run, or install without swap."
+                exit 1
             fi
 
             log_info "Creating ${SWAP_SIZE_MB}MB swap file..."
-            sudo fallocate -l "${SWAP_SIZE_MB}M" /swapfile
+            if ! sudo fallocate -l "${SWAP_SIZE_MB}M" /swapfile; then
+                sudo rm -f /swapfile
+                log_error "Could not allocate the swap file."
+                exit 1
+            fi
             sudo chmod 600 /swapfile
             sudo mkswap /swapfile
             sudo swapon /swapfile
@@ -1624,7 +1762,7 @@ echo -e "${GREEN}║${NC} Nginx:           ${YELLOW}Not installed${NC}"
 fi
 echo -e "${GREEN}║${NC} Firewall (UFW):  ${GREEN}Enabled${NC}"
 if [ "$SETUP_SWAP" = "yes" ]; then
-echo -e "${GREEN}║${NC} Swap:            ${GREEN}Enabled${NC}"
+echo -e "${GREEN}║${NC} Swap:            ${GREEN}Enabled${NC} (${SWAP_SIZE_MB}MB)"
 fi
 if [ "$SETUP_BACKUP" = "yes" ]; then
 echo -e "${GREEN}║${NC} Backups:         ${GREEN}Daily at $BACKUP_HOUR${NC} (retain ${BACKUP_RETENTION}d, filestore: $BACKUP_FILESTORE)"

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Six standalone Bash scripts that deploy and manage production Odoo on Ubuntu (20.04/22.04/24.04), plus `abo`, a dispatcher that fronts them. No build, no test suite, no CI. `requirements.txt` is payload — extra Python packages installed into the target server's venv, not this repo's deps.
+Seven standalone Bash scripts that deploy and manage production Odoo on Ubuntu (20.04/22.04/24.04), plus `abo`, a dispatcher that fronts them. No build, no test suite, no CI. `requirements.txt` is payload — extra Python packages installed into the target server's venv, not this repo's deps.
 
 **`abo` is a dispatcher and nothing else.** It resolves `LIBDIR` (its own directory in a checkout, `../lib/abo` when installed) and `exec`s `odoo_<cmd>.sh` with every argument passed through untouched. Never put logic in it — each subcommand script must keep working when run directly, which is what the "Which files do I need?" table in the README promises. Adding a subcommand is one `case` arm plus one line in the Makefile's `SCRIPTS`.
 
@@ -70,9 +70,13 @@ Certbot is invoked `--redirect --keep-until-expiring --expand` — the first bec
 
 **Input flow.** All prompts + the confirmation summary run before any system mutation. Prompts loop until valid (except the addon-URL list, which exits 1 on a bad URL). Keep new prompts in that pre-mutation block.
 
+**Timezone and swap size are answers, not constants.** `OE_TIMEZONE` defaults to the server's own zone (`system_timezone`) rather than a hardcoded one, and reaches both `timedatectl set-timezone` and a psql string literal — so `validate_timezone` gates it at the prompt *and* again after the answers file is sourced, since a hand-written answers file is a documented workflow. `SWAP_SIZE_MB` is capped at 10% of `/` (`max_swap_mb`) because swap shares that disk with the database and filestore; a cap under 512MB turns swap off instead of creating a useless file. Both sit in `save_answers()` and both have a `${VAR:-}` fallback after the prompt block's closing `fi`, so an answers file written before they existed still resumes.
+
 **Auto-tuning** (derived-variables block, ~line 293): `workers = min(cores*2+1, RAM_MB/256)` floored at 2; soft memory limit = 80% RAM split across `workers + cron + 1`; hard = soft*1.2; `db_maxconn = workers*2+4`. Values land in both the config file and the summary output — update both.
 
 **`odoo_update.sh` must never unshallow or clean.** The installer clones `--depth 1`, so the update fetches `--depth 1` too; unshallowing pulls ~2GB nobody asked for. It uses `git reset --hard FETCH_HEAD` and never `git clean` — the venv sits at `$OE_HOME_EXT/venv`, inside the work tree but untracked, so a clean would delete the interpreter mid-update. Requirements are reinstalled only when `sha256sum requirements.txt` differs across the reset. `-m` (`odoo-bin -u all`) stops the service first and hard-fails if no `odoo_backup.sh` can be found, because module-data upgrades are not reversible.
+
+**`odoo_status.sh` must stay cheap.** It is meant to be run on a whim and from cron, so every check is an O(1) query — `df`, `stat`, `pg_database_size()`, `ss`. Never add a `du` over the filestore or a `find` across the home directory. It discovers instances by globbing `/home/*/*-odoo.conf` and matching the path back exactly, so a stray file cannot invent an instance. It reports a certificate's expiry but deliberately does *not* repeat `odoo_ssl.sh`'s SAN-vs-`server_name` diff — one place for that check. Exit status is the interface: non-zero means something needs attention, so anything new that prints a warning must also count into `PROBLEMS`.
 
 **`odoo_ssl.sh` is a reporter, not a renewal implementation.** `certbot.timer` already renews; the script wraps `certbot renew` and exists for the report. Its one non-wrapper check is `comm -23` of the site's `server_name` against the certificate's SANs — the mismatch that produces "Not secure" while every automated component reports success. It resolves `-u` to a domain the same way `odoo_remove.sh` finds the site (grep `sites-available` for `upstream ${OE_USER}_odoo`), and matches a domain to a lineage by reading the SANs rather than trusting the directory name, since certbot appends `-0001` on a collision. `certbot renew --cert-name` takes one lineage and the last flag wins, so a scoped run loops one certbot call per certificate — never build a repeated-flag argument array there.
 
