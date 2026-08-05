@@ -12,6 +12,7 @@
 #   abo backup     back up an instance's databases
 #   abo update     pull the latest Odoo source and restart
 #   abo remove     delete an instance and everything it owns
+#   abo ssl        certificate status, and renew what is due
 #
 # Author: abdalmola
 # License: LGPL-3
@@ -52,6 +53,7 @@ Commands:
   backup     Back up every database an instance owns
   update     Pull the latest Odoo source for an instance and restart it
   remove     Delete an instance: service, databases, files, Nginx site
+  ssl        Report on the SSL certificates and renew whatever is due
 
 Every command takes -h for its own options:
 
@@ -61,6 +63,8 @@ Every command takes -h for its own options:
   sudo abo backup -u odoo18 -f
   sudo abo update -u odoo18
   sudo abo remove -u odoo18
+  sudo abo ssl                     status of every certificate
+  sudo abo ssl -u odoo18 -t        test renewal for one instance
 
   abo backup -h            options for one command
   abo version              version and script location
@@ -86,6 +90,7 @@ case "$CMD" in
     backup)  run odoo_backup.sh  "$@" ;;
     update)  run odoo_update.sh  "$@" ;;
     remove)  run odoo_remove.sh  "$@" ;;
+    ssl)     run odoo_ssl.sh     "$@" ;;
     version|--version|-v)
         echo "abo $ABO_VERSION"
         echo "scripts: $LIBDIR"

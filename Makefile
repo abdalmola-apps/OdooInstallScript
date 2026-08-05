@@ -15,7 +15,8 @@ PREFIX  ?= /usr/local
 BINDIR   = $(DESTDIR)$(PREFIX)/bin
 LIBDIR   = $(DESTDIR)$(PREFIX)/lib/abo
 
-SCRIPTS = odoo_install.sh odoo_nginx.sh odoo_backup.sh odoo_update.sh odoo_remove.sh
+SCRIPTS = odoo_install.sh odoo_nginx.sh odoo_backup.sh odoo_update.sh odoo_remove.sh \
+          odoo_ssl.sh
 
 # Removed in 2.3.0, when the three flat commands became `abo` subcommands.
 LEGACY = odoo-install odoo-nginx odoo-backup

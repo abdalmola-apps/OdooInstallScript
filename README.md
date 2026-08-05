@@ -53,6 +53,7 @@ That puts a single `abo` command on `PATH`, with five subcommands:
 | `abo backup` | Back up every database an instance owns | `odoo_backup.sh` |
 | `abo update` | Pull the latest Odoo source and restart | `odoo_update.sh` |
 | `abo remove` | Delete an instance and everything it owns | `odoo_remove.sh` |
+| `abo ssl` | Certificate status, and renew whatever is due | `odoo_ssl.sh` |
 
 ```bash
 sudo abo install
@@ -113,6 +114,7 @@ The three scripts are independent programs. Take only what you need:
 | Everything | all of the above | `sudo ./odoo_install.sh` |
 | Nginx + SSL for an Odoo I already have | `odoo_nginx.sh` | [Standalone Nginx Setup](#standalone-nginx-setup) |
 | Backups for an Odoo I already have | `odoo_backup.sh` | [Automated Backups](#automated-backups) |
+| To check on my certificates | `odoo_ssl.sh` | [SSL Certificates](#ssl-certificates) |
 
 `requirements.txt` is optional for a bare install, but **required for backups** — it installs `click-odoo-contrib`, which `odoo_backup.sh` uses. The installer picks it up automatically when it sits beside `odoo_install.sh`.
 
@@ -362,6 +364,39 @@ Without `-m` this is source-only and safe on a live instance: fetch the instance
 The clone is shallow (`--depth 1`), and the update keeps it that way — it never unshallows and never runs `git clean`, because the virtualenv lives at `odoo/venv`, inside the work tree but untracked.
 
 This updates **within a series** (18.0 → 18.0). Moving between series (17.0 → 18.0) is a database migration, not an update; this script will not attempt one.
+
+## SSL Certificates
+
+```bash
+sudo abo ssl                    # every certificate: what it covers, days left
+sudo abo ssl -u odoo18          # just this instance's
+sudo abo ssl -t                 # test renewal, change nothing
+sudo abo ssl -u odoo18 -f       # replace a broken certificate now
+```
+
+**Renewal is already automatic** — certbot installs a systemd timer that runs twice a day and renews anything inside its last 30 days. You do not need to run this on a schedule.
+
+What it is for is seeing the state of things, and the check certbot does not do: comparing the names Nginx **serves** against the names each certificate **covers**.
+
+```
+  erp.example.com
+    Expires:  71 day(s) left
+    Covers:   erp.example.com
+    Served but NOT on the certificate: www.erp.example.com
+```
+
+That mismatch is the "Not secure" bug. The Odoo site is usually the only enabled Nginx site, which makes it the default server, so it answers for any hostname pointed at the box — and hands over a certificate that does not match. Nothing fails, no log records it, and the timer keeps renewing the incomplete certificate. The fix is to re-run `abo nginx`, which adds the name to both `server_name` and the certificate.
+
+The run also checks that `certbot.timer` is actually enabled, and enables it if not. An unarmed timer is silent for 90 days and then the site goes down.
+
+| Flag | Meaning |
+|------|---------|
+| `-u <username>` | Only this instance's certificate. The domain is read from the Nginx site holding its `<user>_odoo` upstream |
+| `-d <domain>` | Only the certificate covering this domain |
+| `-f` | Renew even when not due. Let's Encrypt allows 5 duplicate certificates per week — for replacing a broken one, not for routine use |
+| `-t` | Test with `certbot renew --dry-run`. Changes nothing, counts against no rate limit |
+
+Without `-u` or `-d` it covers every certificate on the server.
 
 ## Removing an Instance
 
