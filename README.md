@@ -44,7 +44,7 @@ If you deploy more than one server, install the toolkit once:
 sudo make install
 ```
 
-That puts a single `abo` command on `PATH`, with five subcommands:
+That puts a single `abo` command on `PATH`, with six subcommands:
 
 | Command | Does | Script |
 |---------|------|--------|
@@ -62,6 +62,7 @@ sudo abo nginx  -u odoo18 -d erp.mycompany.com -e admin@mycompany.com
 sudo abo backup -u odoo18 -f
 sudo abo update -u odoo18
 sudo abo remove -u odoo18
+sudo abo ssl    -u odoo18
 
 abo help                # all commands
 abo backup -h           # options for one command
@@ -389,14 +390,17 @@ That mismatch is the "Not secure" bug. The Odoo site is usually the only enabled
 
 The run also checks that `certbot.timer` is actually enabled, and enables it if not. An unarmed timer is silent for 90 days and then the site goes down.
 
-| Flag | Meaning |
-|------|---------|
-| `-u <username>` | Only this instance's certificate. The domain is read from the Nginx site holding its `<user>_odoo` upstream |
-| `-d <domain>` | Only the certificate covering this domain |
-| `-f` | Renew even when not due. Let's Encrypt allows 5 duplicate certificates per week — for replacing a broken one, not for routine use |
-| `-t` | Test with `certbot renew --dry-run`. Changes nothing, counts against no rate limit |
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-u <username>` | Only this instance's certificate. The domain is read from the Nginx site holding its `<user>_odoo` upstream | every certificate on the server |
+| `-d <domain>` | Only the certificate covering this domain. Matched against what each certificate actually covers, not the directory name | every certificate on the server |
+| `-f` | Renew even when not due. Let's Encrypt allows 5 duplicate certificates per week — for replacing a broken certificate, not for routine use | off |
+| `-t` | Test with `certbot renew --dry-run`. Changes nothing and counts against no rate limit | off |
+| `-h` | Show help | — |
 
-Without `-u` or `-d` it covers every certificate on the server.
+`-f` and `-t` are mutually exclusive. With neither, a certificate is renewed only inside its last 30 days — the same window certbot's own timer uses — so a plain `sudo abo ssl` is safe to run as often as you like.
+
+Exit status is non-zero if a renewal or a dry run failed, so it works in a monitoring check.
 
 ## Removing an Instance
 
