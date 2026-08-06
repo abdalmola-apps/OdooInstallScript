@@ -342,7 +342,7 @@ cleanup() {
     # "failed at step unknown, resume from step 1" just muddies it.
     if [ $exit_code -ne 0 ] && [ "${CURRENT_STEP:-0}" -ge 1 ]; then
         echo ""
-        log_error "Script failed at step ${CURRENT_STEP:-unknown} of 20 (exit code: $exit_code)"
+        log_error "Script failed at step ${CURRENT_STEP:-unknown} of 21 (exit code: $exit_code)"
         log_error "To resume: re-run this script, enter the same username"
         log_error "('${OE_USER:-<username>}'), and accept the saved answers when asked."
         log_error "It will skip the completed steps and continue from step ${CURRENT_STEP:-1}."
@@ -461,7 +461,7 @@ fi
 
 REUSE_ANSWERS="no"
 if sudo test -f "$ANSWERS_FILE"; then
-    log_info "A previous run for '$OE_USER' stopped after step $(get_last_checkpoint) of 20."
+    log_info "A previous run for '$OE_USER' stopped after step $(get_last_checkpoint) of 21."
     if [ "$EXPRESS" = "yes" ]; then
         REUSE_ANSWERS="yes"
         log_info "Express mode — reusing the saved answers."
@@ -933,6 +933,9 @@ OE_HOME_EXT="$OE_HOME/odoo"
 OE_CONFIG="${OE_USER}-odoo.conf"
 OE_SERVICE="${OE_USER}-odoo.service"
 OE_DATA_DIR="$OE_HOME/data"
+# Logs get their own directory so logrotate can take the whole thing with one
+# glob — the data dir holds the filestore and sessions, which must never rotate.
+OE_LOG_DIR="$OE_HOME/logs"
 OE_CUSTOM_ADDONS_DIR="$OE_HOME/custom-addons"
 OE_LONGPOLLING_PORT=$((OE_PORT + 1))
 
@@ -1292,9 +1295,9 @@ fi
 
 # Step 8: Create Directories
 if step 8 "Create Odoo Directories"; then
-    log_info "Creating data and custom-addons directories..."
-    sudo mkdir -p "$OE_DATA_DIR" "$OE_CUSTOM_ADDONS_DIR"
-    sudo chown -R "$OE_USER:$OE_USER" "$OE_DATA_DIR" "$OE_CUSTOM_ADDONS_DIR"
+    log_info "Creating data, logs and custom-addons directories..."
+    sudo mkdir -p "$OE_DATA_DIR" "$OE_LOG_DIR" "$OE_CUSTOM_ADDONS_DIR"
+    sudo chown -R "$OE_USER:$OE_USER" "$OE_DATA_DIR" "$OE_LOG_DIR" "$OE_CUSTOM_ADDONS_DIR"
     log_success "Directories created."
     save_checkpoint 8
 fi
@@ -1366,7 +1369,7 @@ $GEVENT_KEY = $OE_LONGPOLLING_PORT
 
 addons_path = $ADDONS_PATH
 data_dir = $OE_DATA_DIR
-logfile = $OE_DATA_DIR/odoo-server.log
+logfile = $OE_LOG_DIR/odoo-server.log
 
 ; Performance tuning (auto-computed: CPU=$CPU_CORES, RAM=${RAM_MB}MB)
 workers = $WORKERS
@@ -1438,6 +1441,7 @@ if step 13 "Set Ownership & Permissions"; then
     log_info "Setting directory ownership..."
     sudo chown -R "$OE_USER:$OE_USER" "$OE_HOME_EXT"
     sudo chown -R "$OE_USER:$OE_USER" "$OE_DATA_DIR"
+    sudo chown -R "$OE_USER:$OE_USER" "$OE_LOG_DIR"
     sudo chown -R "$OE_USER:$OE_USER" "$OE_CUSTOM_ADDONS_DIR"
     log_success "Permissions set."
     save_checkpoint 13
@@ -1446,8 +1450,15 @@ fi
 # Step 14: Logrotate
 if step 14 "Configure Logrotate"; then
     log_info "Creating logrotate config for Odoo logs..."
+    # Also created in step 8; repeated here so a resume that starts past step 8
+    # still has somewhere for the glob to point.
+    sudo mkdir -p "$OE_LOG_DIR"
+    sudo chown "$OE_USER:$OE_USER" "$OE_LOG_DIR"
+    # The whole directory, so backup.log rotates on the same schedule without a
+    # second rule. copytruncate because Odoo holds the file open and does not
+    # reopen on a signal.
     sudo tee "/etc/logrotate.d/${OE_USER}-odoo" > /dev/null <<LOGROTATE_CONF
-$OE_DATA_DIR/odoo-server.log {
+$OE_LOG_DIR/*.log {
     weekly
     rotate 12
     compress
@@ -1459,7 +1470,7 @@ $OE_DATA_DIR/odoo-server.log {
 }
 LOGROTATE_CONF
 
-    log_success "Logrotate configured (weekly, 12 rotations)."
+    log_success "Logrotate configured for $OE_LOG_DIR (weekly, 12 rotations)."
     save_checkpoint 14
 fi
 
@@ -1583,7 +1594,7 @@ if step 18 "Start Odoo Service"; then
         log_error "Odoo is NOT listening on port $OE_PORT after 60s."
         log_error "The rest of the install will continue, but the site will not load."
         log_error "  sudo systemctl status $OE_SERVICE --no-pager"
-        log_error "  sudo tail -50 $OE_DATA_DIR/odoo-server.log"
+        log_error "  sudo tail -50 $OE_LOG_DIR/odoo-server.log"
     fi
     save_checkpoint 18
 fi
@@ -1630,7 +1641,7 @@ if step 19 "Set Up Automated Backups"; then
                 log_warn "Could not enable the cron service — check 'systemctl status cron'."
 
             # Install cron job
-            CRON_LINE="$CRON_MIN $CRON_HOUR * * * $BACKUP_SCRIPT_DST $BACKUP_FLAGS >> $OE_DATA_DIR/backup.log 2>&1"
+            CRON_LINE="$CRON_MIN $CRON_HOUR * * * $BACKUP_SCRIPT_DST $BACKUP_FLAGS >> $OE_LOG_DIR/backup.log 2>&1"
 
             # `|| true` covers both empty cases, either of which used to abort
             # the whole run with a bare exit 1 under `set -e` + pipefail:
@@ -1698,6 +1709,31 @@ if step 20 "Create First Database"; then
     save_checkpoint 20
 fi
 
+# Step 21: Weekly rotation for the logs this install does not own.
+# Appended at the end: step numbers are a persisted resume interface.
+if step 21 "Set Nginx & PostgreSQL Logs to Weekly Rotation"; then
+    # Odoo's own logs are handled by step 14. These two files belong to their
+    # packages — Nginx ships daily/rotate 14, postgresql-common ships weekly —
+    # and the per-instance Nginx logs (${OE_USER}-odoo-*.log) fall under the
+    # distro's /var/log/nginx/*.log glob, so editing that file in place is the
+    # only way to reach them without a duplicate-entry error from logrotate.
+    #
+    # The interval is the only directive that is a bare keyword on its own line,
+    # so the substitution is unambiguous and re-running it is a no-op. Note that
+    # apt will offer the usual conffile prompt on the next package upgrade.
+    for LR_CONF in /etc/logrotate.d/nginx /etc/logrotate.d/postgresql-common; do
+        [ -f "$LR_CONF" ] || continue
+        if sudo grep -qE '^[[:space:]]*(hourly|daily|monthly|yearly)[[:space:]]*$' "$LR_CONF"; then
+            sudo sed -i -E 's/^([[:space:]]*)(hourly|daily|monthly|yearly)[[:space:]]*$/\1weekly/' \
+                "$LR_CONF"
+            log_success "$(basename "$LR_CONF"): rotation set to weekly."
+        else
+            log_success "$(basename "$LR_CONF"): already weekly."
+        fi
+    done
+    save_checkpoint 21
+fi
+
 # ==============================================================================
 # Section 10: Final Summary
 # ==============================================================================
@@ -1744,7 +1780,7 @@ echo -e "${GREEN}║${NC}   ${YELLOW}  --workers=0 --no-http --stop-after-init${
 fi
 echo -e "${GREEN}║${NC}"
 echo -e "${GREEN}║${NC} Config File:     $OE_HOME/$OE_CONFIG"
-echo -e "${GREEN}║${NC} Log File:        $OE_DATA_DIR/odoo-server.log"
+echo -e "${GREEN}║${NC} Logs:            $OE_LOG_DIR/  (logrotate: weekly, 12 kept)"
 echo -e "${GREEN}║${NC} Workers:         $WORKERS"
 echo -e "${GREEN}║${NC}"
 echo -e "${GREEN}║${NC} Service Commands:"

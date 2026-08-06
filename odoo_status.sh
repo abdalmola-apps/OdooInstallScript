@@ -241,7 +241,10 @@ for u in "${INSTANCES[@]}"; do
             COUNT="$(find "$BACKUP_DIR" -maxdepth 1 -name '*.zip' | wc -l)"
             if [ "$AGE_H" -gt "$BACKUP_STALE_HOURS" ]; then
                 warn "newest backup is ${AGE_H}h old ($SIZE, $COUNT kept)"
-                note "crontab -l | grep odoo_backup   ·   tail /home/$u/data/backup.log"
+                # From the config, not a fixed path: installs made before the
+                # logs directory existed still keep their logs beside the data.
+                LOG_DIR="$(dirname "$(conf_value "$CONF" 'logfile')")"
+                note "crontab -l | grep odoo_backup   ·   tail ${LOG_DIR:-/home/$u/logs}/backup.log"
             else
                 ok "backed up ${AGE_H}h ago ($SIZE, $COUNT kept)"
             fi

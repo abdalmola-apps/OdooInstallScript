@@ -60,7 +60,7 @@ flowchart LR
         NG["Nginx<br/>site: erp.example.com<br/>upstreams: odoo18_odoo · odoo18_gevent"]
         OD["Odoo · odoo18-odoo.service<br/>venv · workers auto-tuned"]
         PG[("PostgreSQL<br/>role odoo18<br/>no superuser")]
-        FS["/home/odoo18/data<br/>filestore · log"]
+        FS["/home/odoo18<br/>data · logs"]
         BK["/home/odoo18/backups<br/>nightly .zip"]
     end
 
@@ -318,15 +318,16 @@ The server's address comes from `hostname -I` **plus** its public IP via `api.ip
 ## Reference
 
 <details>
-<summary><b>The 20 install steps</b></summary>
+<summary><b>The 21 install steps</b></summary>
 
 | | | | |
 |---|---|---|---|
 | 1 PostgreSQL | 6 venv + Python deps | 11 Odoo config *(tuned)* | 16 UFW firewall |
 | 2 System timezone | 7 Node.js, LESS, rtlcss | 12 systemd unit | 17 Swap *(cond.)* |
 | 3 System + PG user | 8 Directories | 13 Ownership | 18 Start + wait for the port |
-| 4 Clone Odoo | 9 Ed25519 SSH key | 14 Logrotate | 19 Backup cron *(cond.)* |
+| 4 Clone Odoo | 9 Ed25519 SSH key | 14 Logrotate — Odoo | 19 Backup cron *(cond.)* |
 | 5 Deps + wkhtmltopdf | 10 Custom addon repos | 15 Nginx + SSL *(cond.)* | 20 First database *(cond.)* |
+| | | | 21 Logrotate — Nginx, PostgreSQL |
 
 Step 18 waits for the socket rather than trusting `systemctl start`, which returns as soon as the process forks — that exits 0 for an Odoo that dies a second later.
 </details>
@@ -412,8 +413,9 @@ The patched-Qt build is required — the plain apt version lacks `--header-spaci
 │   ├── odoo-bin
 │   ├── venv/                 # inside the work tree, untracked
 │   └── requirements.txt
-├── data/
-│   ├── odoo-server.log       # logrotate: weekly, 12 rotations, copytruncate
+├── data/                     # filestore and sessions — never rotated
+├── logs/                     # logrotate: weekly, 12 rotations, copytruncate
+│   ├── odoo-server.log
 │   └── backup.log
 ├── backups/
 │   └── <dbname>_<timestamp>.zip
@@ -424,6 +426,8 @@ The patched-Qt build is required — the plain apt version lacks `--header-spaci
 ```
 
 Elsewhere: `/etc/systemd/system/<user>-odoo.service`, `/etc/logrotate.d/<user>-odoo`, `/etc/nginx/sites-available/<domain>`, `/var/lib/odoo-install/<user>.*`.
+
+Everything on the box rotates **weekly**. `/home/<user>/logs/*.log` gets its own rule; the Nginx and PostgreSQL logs stay under their packages' rules, switched from the shipped interval to weekly in place — the per-instance Nginx logs fall under the distro's `/var/log/nginx/*.log` glob, so a second rule for them would only earn a duplicate-entry error. Expect the usual apt conffile prompt when those two packages next update.
 </details>
 
 <details>
@@ -444,7 +448,7 @@ sudo systemctl restart <user>-odoo.service
 ```bash
 sudo systemctl status <user>-odoo.service
 sudo journalctl -u <user>-odoo.service -n 50
-tail -f /home/<user>/data/odoo-server.log
+tail -f /home/<user>/logs/odoo-server.log
 ```
 
 | Symptom | Look at |

@@ -298,7 +298,11 @@ if ss -Hltn "sport = :$OE_PORT" 2>/dev/null | grep -q .; then
 else
     log_error "Odoo is NOT listening on port $OE_PORT after the update."
     log_error "  systemctl status $OE_SERVICE --no-pager"
-    log_error "  tail -50 $OE_HOME/data/odoo-server.log"
+    # From the config: installs made before the logs directory existed still
+    # keep their log beside the data.
+    LOG_FILE="$(sudo grep -m1 '^logfile' "$OE_HOME/${OE_USER}-odoo.conf" 2>/dev/null \
+        | cut -d= -f2- | tr -d ' ' || true)"
+    log_error "  tail -50 ${LOG_FILE:-$OE_HOME/logs/odoo-server.log}"
     log_error "Roll back with: sudo -u $OE_USER git -C $OE_HOME_EXT reset --hard $OLD_COMMIT"
     exit 1
 fi

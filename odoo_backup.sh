@@ -19,7 +19,7 @@
 #   sudo ./odoo_backup.sh -u <username> [-d <backup_dir>] [-r <days>] [-f] [-q]
 #
 # Designed for cron:
-#   0 2 * * * /home/<user>/odoo_backup.sh -u <user> -f -q >> /home/<user>/data/backup.log 2>&1
+#   0 2 * * * /home/<user>/odoo_backup.sh -u <user> -f -q >> /home/<user>/logs/backup.log 2>&1
 #
 # Author: abdalmola
 # License: LGPL-3
@@ -105,7 +105,7 @@ Examples:
   sudo $0 -u odoo18 -f
 
   # Cron: daily at 2 AM, quiet, 14-day retention
-  0 2 * * * /home/odoo18/odoo_backup.sh -u odoo18 -f -q -r 14 >> /home/odoo18/data/backup.log 2>&1
+  0 2 * * * /home/odoo18/odoo_backup.sh -u odoo18 -f -q -r 14 >> /home/odoo18/logs/backup.log 2>&1
 EOF
     exit 0
 }
