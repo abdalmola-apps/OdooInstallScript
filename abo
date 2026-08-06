@@ -14,6 +14,7 @@
 #   abo remove     delete an instance and everything it owns
 #   abo ssl        certificate status, and renew what is due
 #   abo status     how every instance on this server is doing
+#   abo logs       where the logs are, and move old installs into logs/
 #
 # Author: abdalmola
 # License: LGPL-3
@@ -56,6 +57,7 @@ Commands:
   remove     Delete an instance: service, databases, files, Nginx site
   ssl        Report on the SSL certificates and renew whatever is due
   status     Service, port, databases, backups and certificate at a glance
+  logs       Report the log layout; -m moves an old install into logs/
 
 Every command takes -h for its own options:
 
@@ -67,6 +69,8 @@ Every command takes -h for its own options:
   sudo abo remove -u odoo18
   sudo abo ssl                     status of every certificate
   sudo abo ssl -u odoo18 -t        test renewal for one instance
+  sudo abo logs                    where every instance keeps its logs
+  sudo abo logs -m                 move pre-2.5 installs into /home/<user>/logs
 
   abo backup -h            options for one command
   abo version              version and script location
@@ -94,6 +98,7 @@ case "$CMD" in
     remove)  run odoo_remove.sh  "$@" ;;
     ssl)     run odoo_ssl.sh     "$@" ;;
     status)  run odoo_status.sh  "$@" ;;
+    logs)    run odoo_logs.sh    "$@" ;;
     version|--version|-v)
         echo "abo $ABO_VERSION"
         echo "scripts: $LIBDIR"

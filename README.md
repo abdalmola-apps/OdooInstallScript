@@ -30,6 +30,7 @@ sudo make install        # -> /usr/local/bin/abo
 | `abo update` | Pull the latest Odoo source and restart | `odoo_update.sh` |
 | `abo ssl` | Certificate status, renew what is due | `odoo_ssl.sh` |
 | `abo status` | How every instance is doing, at a glance | `odoo_status.sh` |
+| `abo logs` | Where the logs are; migrate old installs | `odoo_logs.sh` |
 | `abo remove` | Delete an instance and everything it owns | `odoo_remove.sh` |
 
 ```bash
@@ -39,6 +40,7 @@ sudo abo backup -u odoo18 -f
 sudo abo update -u odoo18
 sudo abo ssl
 sudo abo status
+sudo abo logs
 sudo abo remove -u odoo18
 
 abo help · abo <cmd> -h · abo version
@@ -242,6 +244,24 @@ sudo -u <user> /home/<user>/odoo/venv/bin/click-odoo-restoredb \
 
 `--neutralize` disables scheduled actions and outgoing mail — **always use it for a staging or dev copy.** `--force` overwrites an existing target; the default `--copy` regenerates the database UUID so the restore does not conflict with the original.
 
+### Logs
+
+Everything on the box rotates weekly. Each instance keeps its logs in `/home/<user>/logs`, rotated by one rule that globs the directory — so `backup.log` is covered without a rule of its own, and the filestore in `/home/<user>/data` is not in scope. Nginx and PostgreSQL keep their packages' rules, switched to weekly in place.
+
+```bash
+sudo abo logs           # where every instance keeps its logs
+sudo abo logs -m        # migrate the ones still on the old layout
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-u <username>` | One instance | every instance found |
+| `-m` | Migrate: move the logs and rewrite config, rule and cron | off (report only) |
+
+Instances installed before this layout keep `odoo-server.log` beside the filestore, under a rule that names that one file — so `backup.log` grows forever. `-m` moves both, repoints `logfile`, rewrites the logrotate rule and fixes the backup cron's redirect. The move is a rename within `/home/<user>`, so a running Odoo follows the same inode and needs no restart; if the two directories turn out to be on different filesystems the script stops rather than leave Odoo writing into an unlinked file.
+
+Without `-m` nothing is touched and it exits non-zero when anything still needs migrating, so it works as a check.
+
 ### Remove
 
 ```bash
@@ -427,7 +447,7 @@ The patched-Qt build is required — the plain apt version lacks `--header-spaci
 
 Elsewhere: `/etc/systemd/system/<user>-odoo.service`, `/etc/logrotate.d/<user>-odoo`, `/etc/nginx/sites-available/<domain>`, `/var/lib/odoo-install/<user>.*`.
 
-Everything on the box rotates **weekly**. `/home/<user>/logs/*.log` gets its own rule; the Nginx and PostgreSQL logs stay under their packages' rules, switched from the shipped interval to weekly in place — the per-instance Nginx logs fall under the distro's `/var/log/nginx/*.log` glob, so a second rule for them would only earn a duplicate-entry error. Expect the usual apt conffile prompt when those two packages next update.
+Nginx and PostgreSQL are rotated by their own packages' rules, edited to weekly in place — the per-instance Nginx logs already fall under the distro's `/var/log/nginx/*.log` glob, so a second rule for them would only earn a duplicate-entry error. Expect the usual apt conffile prompt when those two packages next update. See [Logs](#logs).
 </details>
 
 <details>
