@@ -30,3 +30,7 @@ node_modules/
 # Misc
 *.bak
 *.orig
+
+# Scratch: pasted output from a server, kept out of the repo
+error
+error.txt
