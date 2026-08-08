@@ -237,10 +237,13 @@ sudo abo backup -u odoo18 -f -r 14 -d /mnt/backups
 Restore:
 
 ```bash
-sudo -u <user> /home/<user>/odoo/venv/bin/click-odoo-restoredb \
+sudo -u <user> -H env PYTHONPATH=/home/<user>/odoo \
+    /home/<user>/odoo/venv/bin/click-odoo-restoredb \
     -c /home/<user>/<user>-odoo.conf --neutralize \
     <new_dbname> /home/<user>/backups/<dbname>_<timestamp>.zip
 ```
+
+`PYTHONPATH` is not optional: Odoo runs from its source tree and is never pip-installed into the venv, so `click_odoo`'s `import odoo` fails without it. `odoo_backup.sh` sets it for you.
 
 `--neutralize` disables scheduled actions and outgoing mail — **always use it for a staging or dev copy.** `--force` overwrites an existing target; the default `--copy` regenerates the database UUID so the restore does not conflict with the original.
 

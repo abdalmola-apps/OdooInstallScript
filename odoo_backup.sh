@@ -96,8 +96,10 @@ Options:
 Output:
   One <dbname>_<timestamp>.zip per database (manifest.json + dump.sql +
   filestore). Restore through Odoo's web interface, or:
-    sudo -u <user> /home/<user>/odoo/venv/bin/click-odoo-restoredb \\
+    sudo -u <user> -H env PYTHONPATH=/home/<user>/odoo \\
+        /home/<user>/odoo/venv/bin/click-odoo-restoredb \\
         -c /home/<user>/<user>-odoo.conf --neutralize <newdb> <backup.zip>
+  (PYTHONPATH is required: Odoo runs from its source tree, not from the venv.)
   (--neutralize disables crons and outgoing mail — use it for staging copies.)
 
 Examples:
@@ -160,11 +162,22 @@ fi
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 
 # click-odoo-backupdb imports odoo, so it has to be the instance's own venv.
-BACKUPDB="$OE_HOME/odoo/venv/bin/click-odoo-backupdb"
+OE_SRC="$OE_HOME/odoo"
+BACKUPDB="$OE_SRC/venv/bin/click-odoo-backupdb"
 if [ ! -x "$BACKUPDB" ]; then
     log_error "click-odoo-backupdb not found at $BACKUPDB"
     log_error "Install it into the instance venv:"
-    log_error "  sudo -u $OE_USER $OE_HOME/odoo/venv/bin/pip install click-odoo-contrib"
+    log_error "  sudo -u $OE_USER $OE_SRC/venv/bin/pip install click-odoo-contrib"
+    exit 1
+fi
+
+# Odoo is run from its source tree, not pip-installed into the venv — the
+# systemd unit only resolves `import odoo` because of WorkingDirectory. This
+# script is invoked from wherever the operator or cron happens to be, so the
+# source root has to be named explicitly or click_odoo dies on `import odoo`.
+if [ ! -f "$OE_SRC/odoo/__init__.py" ]; then
+    log_error "No Odoo source at $OE_SRC (expected $OE_SRC/odoo/__init__.py)."
+    log_error "click-odoo-backupdb imports odoo and cannot run without it."
     exit 1
 fi
 
@@ -280,8 +293,10 @@ for db in $SORTED_DBS; do
     log_info "Backing up database '$db'..."
 
     # Runs as the Odoo user: the config is chmod 640 and the filestore is owned
-    # by that user. -H so click-odoo resolves the right HOME.
-    if sudo -u "$OE_USER" -H "$BACKUPDB" -c "$ODOO_CONF" \
+    # by that user. -H so click-odoo resolves the right HOME. PYTHONPATH via
+    # `env` rather than `sudo VAR=`, which sudoers rejects unless SETENV is set.
+    if sudo -u "$OE_USER" -H env PYTHONPATH="$OE_SRC${PYTHONPATH:+:$PYTHONPATH}" \
+            "$BACKUPDB" -c "$ODOO_CONF" \
             --format zip "$FILESTORE_FLAG" "$db" "$ZIP_FILE"; then
         ZIP_SIZE=$(du -sh "$ZIP_FILE" | cut -f1)
         log_success "  Backup: $ZIP_FILE ($ZIP_SIZE)"
