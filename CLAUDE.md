@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Eight standalone Bash scripts that deploy and manage production Odoo on Ubuntu (20.04/22.04/24.04), plus `abo`, a dispatcher that fronts them. No build, no test suite, no CI. `requirements.txt` is payload — extra Python packages installed into the target server's venv, not this repo's deps.
+Eight standalone Bash scripts that deploy and manage production Odoo on Ubuntu (20.04/22.04/24.04), plus `abo`, a dispatcher that fronts them. No build, no CI. `make check` is shellcheck + `bash -n` + the `tests/*_t.sh` self-checks — small assert scripts covering logic that cannot be exercised without a live server, not a suite. `requirements.txt` is payload — extra Python packages installed into the target server's venv, not this repo's deps.
 
 **`abo` is a dispatcher and nothing else.** It resolves `LIBDIR` (its own directory in a checkout, `../lib/abo` when installed) and `exec`s `odoo_<cmd>.sh` with every argument passed through untouched. Never put logic in it — each subcommand script must keep working when run directly, which is what the "Which files do I need?" table in the README promises. Adding a subcommand is one `case` arm plus one line in the Makefile's `SCRIPTS`.
 
@@ -13,7 +13,7 @@ The `Makefile` installs `abo` to `<prefix>/bin` and the scripts to `<prefix>/lib
 ## Commands
 
 ```bash
-shellcheck odoo_install.sh odoo_nginx.sh odoo_backup.sh   # only available checker
+make check                                                 # shellcheck + bash -n + tests/*_t.sh
 bash -n odoo_install.sh                                    # syntax-only parse
 
 # The scripts mutate a live system (apt, systemd, ufw, /etc/fstab, crontab).
@@ -86,7 +86,7 @@ Certbot is invoked `--redirect --keep-until-expiring --expand` — the first bec
 
 **`odoo_remove.sh` is the only destructive script.** Order matters and is deliberate: inventory → role-blocker check → plan → typed confirmation → backup → service → nginx → cron → databases → role → logrotate → state → UFW → `userdel -r` last, so a failure anywhere earlier still leaves the data on disk.
 
-Role removal is gated twice, and both gates *stop* rather than warn. The predictive one queries `pg_shdepend` at inventory time for objects the role owns in databases whose `datdba` is not that role — i.e. anything outside the set being dropped — and aborts before a single change. The authoritative one is `dropuser`'s own exit status, which aborts before `userdel`, so the account and home survive a failure and the operator can reassign ownership and re-run. Never downgrade either to a warning: a PostgreSQL role outliving its Unix account is an orphan nobody goes looking for. It refuses non-interactive stdin, refuses a hardcoded list of system accounts, and refuses any UID below 1000. It finds the Nginx site by grepping `sites-available` for `upstream ${OE_USER}_odoo` rather than guessing the filename, since sites are named after the domain. Backups go to `/root/abo-removed` with `-r 36500` so the retention sweep cannot prune the last remaining copy. TLS certs are intentionally left in place.
+Role removal is gated twice, and both gates *stop* rather than warn. The predictive one queries `pg_shdepend` at inventory time for objects the role owns in databases whose `datdba` is not that role — i.e. anything outside the set being dropped — and aborts before a single change. The authoritative one is `dropuser`'s own exit status, which aborts before `userdel`, so the account and home survive a failure and the operator can reassign ownership and re-run. Never downgrade either to a warning: a PostgreSQL role outliving its Unix account is an orphan nobody goes looking for. It refuses non-interactive stdin, refuses a hardcoded list of system accounts, and refuses an account with neither `$OE_HOME/${OE_USER}-odoo.conf` nor `${OE_USER}-odoo.service` — never a UID-range test, because the installer's `adduser --system` puts every legitimate instance below 1000. It finds the Nginx site by grepping `sites-available` for `upstream ${OE_USER}_odoo` rather than guessing the filename, since sites are named after the domain. Backups go to `/root/abo-removed` with `-r 36500` so the retention sweep cannot prune the last remaining copy. TLS certs are intentionally left in place.
 
 **Backup selection logic.** Databases are discovered by PostgreSQL ownership (`pg_database.datdba` = the `$OE_USER` role), then ordered by `MAX(write_date)` from `res_users` so the most active DB dumps first; non-Odoo DBs fall back to epoch and sort last. Dumps are `pg_dump -Fc -Z5`; retention prunes by `find -mtime`.
 

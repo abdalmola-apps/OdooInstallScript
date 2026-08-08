@@ -272,7 +272,7 @@ Deletes the service, databases, PostgreSQL role, `/home/<user>` including the fi
 
 It prints everything it found first — every database with its size, the home directory with its size, the Nginx site by name — then requires **the username typed back**. There is no `-y`, and it refuses to run without a terminal. A full backup goes to `/root/abo-removed/` with 100-year retention so the nightly prune cannot delete the last copy; if the backup fails, nothing is removed. `-k` keeps the databases and role, `-n` skips the backup.
 
-Guards: refuses `root`, `postgres`, `www-data`, `nobody`, `ubuntu`, `daemon`, `sync`, `bin`, `sys`, and any UID below 1000. The home directory goes **last**, so a failure anywhere earlier leaves the data on disk. TLS certificates are deliberately kept — `certbot delete` is printed instead, since certificates are often shared or reissued against rate limits.
+Guards: refuses `root`, `postgres`, `www-data`, `nobody`, `ubuntu`, `daemon`, `sync`, `bin`, `sys`, and any account with neither `/home/<user>/<user>-odoo.conf` nor `/etc/systemd/system/<user>-odoo.service` — an instance has to look like one before it can be removed. The home directory goes **last**, so a failure anywhere earlier leaves the data on disk. TLS certificates are deliberately kept — `certbot delete` is printed instead, since certificates are often shared or reissued against rate limits.
 
 <details>
 <summary><b>If the PostgreSQL role owns objects elsewhere</b></summary>

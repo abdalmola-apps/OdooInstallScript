@@ -122,13 +122,22 @@ case "$OE_USER" in
 esac
 
 OE_UID="$(id -u "$OE_USER")"
-if [ "$OE_UID" -lt 1000 ]; then
-    log_error "'$OE_USER' has UID $OE_UID — that is a system account, not an Odoo instance."
-    exit 1
-fi
 
 OE_HOME="/home/$OE_USER"
 OE_SERVICE="${OE_USER}-odoo.service"
+
+# The UID says nothing: the installer creates instances with `adduser --system`,
+# so every one of them lands in the system range. What identifies an instance is
+# its own artefacts, and requiring one of them is what stops a typo from
+# deleting a service account. Same predicate the other scripts discover with.
+if [ ! -f "$OE_HOME/${OE_USER}-odoo.conf" ] && \
+   [ ! -f "/etc/systemd/system/$OE_SERVICE" ]; then
+    log_error "'$OE_USER' does not look like an Odoo instance — neither exists:"
+    log_error "  $OE_HOME/${OE_USER}-odoo.conf"
+    log_error "  /etc/systemd/system/$OE_SERVICE"
+    log_error "Remove it by hand if that is really what you want."
+    exit 1
+fi
 STATE_DIR="/var/lib/odoo-install"
 
 # ==============================================================================

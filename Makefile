@@ -47,6 +47,7 @@ uninstall:
 	rm -rf $(LIBDIR)
 
 check:
-	shellcheck abo $(SCRIPTS)
-	@for f in abo $(SCRIPTS); do bash -n $$f || exit 1; done
+	shellcheck abo $(SCRIPTS) tests/*.sh
+	@for f in abo $(SCRIPTS) tests/*.sh; do bash -n $$f || exit 1; done
+	@for t in tests/*_t.sh; do bash $$t || exit 1; done
 	@echo "OK"
